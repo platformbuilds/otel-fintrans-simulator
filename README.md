@@ -8,75 +8,15 @@ This simulator generates realistic OpenTelemetry metrics, logs, and traces for a
 - **Demo scenarios**: Showcasing platform capabilities with domain-specific observability patterns
 - **Load testing**: Generating controlled telemetry volumes for performance testing
 
-## Hardcoded Values - Exemption Rationale
+## Overview
 
-**NOTE (HCB-008)**: Historically this simulator contained hardcoded metric names, service names, and transaction attributes **by design**. This remains an approved exemption from AGENTS.md §3.6 for simulation fidelity, however the simulator now supports a fully-configurable domain model via `simulator-config.yaml` or the `--config` CLI flag. The values listed below are the default names the simulator uses when no config is provided.
+This simulator generates realistic OpenTelemetry metrics, logs, and traces for a financial transaction processing system. It is fully configuration-driven:
 
-### Why Hardcoding is Acceptable Here
+- Telemetry naming and outputs are configured through `simulator-config.yaml`.
+- Failure scenarios (e.g., bursty failures) are configurable in `simulator-config.yaml`.
+- Telemetry outputs can be OTLP, stdout, or both — controlled by `telemetry.outputs` in the YAML.
 
-1. **Simulation Fidelity**: The simulator must generate specific, realistic metric names (`transactions_total`, `transactions_failed_total`, etc.) that mirror actual financial services observability patterns.
-
-2. **Not Production Code**: This is a development/testing tool, not part of the Mirador Core engine logic. It exists solely to generate synthetic data.
-
-3. **Domain-Specific Vocabulary**: Financial transaction metrics (`transaction_amount_paisa_sum`, `db_latency_seconds`) represent a coherent domain model that would be nonsensical if abstracted.
-
-4. **Self-Contained**: The simulator does not couple to or influence the behavior of the correlation/RCA engines, which remain registry-driven.
-
-### Default elements (configurable)
-
-The following default elements are included for simulation fidelity and are used when no configuration is supplied. All of these defaults can be overridden using `simulator-config.yaml` (see `telemetry.service_names` and `telemetry.metric_names`) or via CLI flags where applicable.
-
-#### Metric Names
-- `transactions_total`
-- `transactions_failed_total`
-- `db_ops_total`
-- `kafka_produce_total`
-- `kafka_consume_total`
-- `transaction_latency_seconds`
-- `db_latency_seconds`
-- `transaction_amount_paisa_sum`
-- `transaction_amount_paisa_count`
-
-#### Service Names (defaults)
-- `api-gateway`
-- `tps` (Transaction Processing Service)
-- `postgres` (Database)
-- `kafka` (Message queue)
-
-#### Transaction Attributes (defaults)
-- `transaction.id`
-- `transaction.type` (UPI, CREDIT_CARD, DEBIT_CARD, NETBANKING, WALLET)
-- `transaction.status` (SUCCESS, FAILED, PENDING)
-- `transaction.amount`
-- `transaction.currency`
-
-#### Resource Attributes
-- `service.name`
-- `service.version`
-- `deployment.environment`
-- `telemetry.sdk.name`
-- `telemetry.sdk.language`
-- `telemetry.sdk.version`
-
-### Configuration and migration path
-
-If you need to **customize** the simulator's domain model (preferred):
-
-1. Edit the default `simulator-config.yaml` in this repository (or create your own) to override `telemetry.service_names`, `telemetry.metric_names`, or `telemetry.outputs`.
-2. Start the simulator using `--config ./simulator-config.yaml` (or point it at your config path).
-3. The simulator will read your config and generate telemetry using the configured names and failure schedules. When `telemetry.outputs` includes `stdout` the simulator will also print telemetry to stdout in a readable format.
-
-This is **not required** for the current use case but provides a path forward if simulation needs diversify.
-
-### Relationship to Mirador Core
-
-**Important**: The correlation and RCA engines in `internal/services/correlation_engine.go` and `internal/rca/` **must never** hardcode these metric/service names. Engines discover KPIs via:
-
-- Stage-00 KPI registry (`internal/repo/kpi_repo.go`)
-- EngineConfig (`internal/config/config.go`)
-- Dynamic service graph discovery
-
-The simulator merely **produces** data that matches patterns the engines **discover** at runtime.
+The simulator is primarily intended for local development, demo scenarios, and load testing.
 
 ## Usage
 
@@ -193,7 +133,7 @@ curl -X POST http://localhost:8010/api/v1/unified/correlate \
 ```
 
 The correlation engine will:
-1. Discover `transactions_failed_total` via KPI registry (not hardcoded!)
+1. Discover `transactions_failed_total` via KPI registry.
 2. Identify correlated service latency patterns
 3. Build service graph from observed trace telemetry
 4. Return correlation result with confidence scores
@@ -218,8 +158,8 @@ curl -X POST http://localhost:8010/api/v1/unified/rca \
 When modifying the simulator:
 
 1. **Keep domain fidelity**: Financial transaction vocabulary should remain realistic
-2. **Don't pollute engines**: Never copy simulator hardcoded names into `internal/services/correlation_engine.go`
-3. **Update this README**: Document any new hardcoded attributes/metrics
+2. **Don't pollute engines**: Avoid copying simulator defaults into `internal/services/correlation_engine.go`; engines should discover KPIs dynamically via the registry.
+3. **Update this README**: Document any new metrics, service names, or configuration changes
 4. **Test with real Mirador**: Ensure correlation/RCA engines still work via registry discovery
 
 ## License
