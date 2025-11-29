@@ -11,6 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	"crypto/tls"
+	"net/http"
+	"net/url"
+	"strings"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -32,13 +37,9 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
-	"net/url"
-	"crypto/tls"
-	"net/http"
-	"strings"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	grpccreds "google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -195,6 +196,10 @@ func main() {
 			endpoint = cfg.Telemetry.Endpoint
 		}
 		insecure = cfg.Telemetry.Insecure
+	}
+	// validate telemetry config and log any helpful warnings for inconsistent combos
+	for _, w := range validateTelemetryConfig(endpoint, insecure, cfg.Telemetry.SkipTLSVerify) {
+		log.Printf("Config warning: %s", w)
 	}
 
 	skipVerify := false
@@ -495,6 +500,57 @@ func initOTel(ctx context.Context, endpoint string, insecureConn bool, skipVerif
 		}
 		return nil
 	}, nil
+}
+
+// validateTelemetryConfig returns a slice of human-friendly warnings
+// describing potentially inconsistent telemetry configuration passed from YAML.
+func validateTelemetryConfig(endpoint string, insecure bool, skipVerify bool) []string {
+	var warnings []string
+
+	if endpoint == "" {
+		return warnings
+	}
+
+	// parse endpoint for scheme detection
+	u, err := url.Parse(endpoint)
+	hasScheme := err == nil && u.Scheme != ""
+
+	// determine protocol heuristic
+	usesHTTP := false
+	if hasScheme {
+		usesHTTP = (u.Scheme == "http" || u.Scheme == "https")
+	} else if strings.Contains(endpoint, ":4318") {
+		usesHTTP = true
+	}
+
+	// HTTP vs gRPC + insecure/skipVerify checks
+	if usesHTTP {
+		// If the endpoint explicitly uses an http scheme but specifies the
+		// conventional gRPC port (4317) that's likely a misconfiguration —
+		// warn the user and suggest the canonical gRPC style (no scheme
+		// e.g. localhost:4317) or using port 4318 for OTLP/HTTP.
+		if hasScheme && u.Scheme == "http" && u.Port() == "4317" {
+			warnings = append(warnings, "endpoint uses http:// on port 4317 — port 4317 is conventionally used for OTLP/gRPC; use 'localhost:4317' (no scheme) for gRPC or use http(s) on port 4318 for OTLP/HTTP")
+		}
+		if hasScheme && u.Scheme == "http" && insecure == false {
+			warnings = append(warnings, "endpoint uses http:// scheme but telemetry.insecure=false — http is plaintext; set insecure=true or use https:// for TLS")
+		}
+		if hasScheme && u.Scheme == "https" && insecure == true {
+			warnings = append(warnings, "endpoint uses https:// but telemetry.insecure=true — insecure=true requests plaintext over TLS endpoint; set insecure=false for TLS or use http:// for plaintext")
+		}
+	} else {
+		// gRPC heuristic
+		if insecure == true && skipVerify == true {
+			warnings = append(warnings, "telemetry.skip_tls_verify is ignored when telemetry.insecure=true (plaintext)")
+		}
+	}
+
+	// skipVerify is only meaningful when TLS is enabled
+	if skipVerify && insecure {
+		warnings = append(warnings, "telemetry.skip_tls_verify=true has no effect when telemetry.insecure=true (plaintext)")
+	}
+
+	return warnings
 }
 
 func (s *Simulator) initMetrics(ctx context.Context) error {
