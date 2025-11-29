@@ -73,13 +73,13 @@ jobs:
         with:
           go-version: 1.24
 
+      - name: Set image tag
+        run: echo "IMAGE_TAG=${{ github.event.inputs.release_tag }}-${{ github.event.inputs.platform }}" >> $GITHUB_ENV
+
       - name: Build binary
         run: |
           mkdir -p dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o dist/otel-fintrans-simulator
-
-      - name: Set image tag
-        run: echo "IMAGE_TAG=${{ github.event.inputs.release_tag }}-${{ github.event.inputs.platform }}" >> $GITHUB_ENV
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ github.event.inputs.platform }} go build -ldflags='-s -w' -o dist/otel-fintrans-simulator-${{ env.IMAGE_TAG }}
 
       - name: Build and push container (GHCR)
         if: ${{ github.event.inputs.push_image == 'true' }}
@@ -129,6 +129,6 @@ jobs:
         uses: actions/upload-release-asset@v1
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/otel-fintrans-simulator
-          asset_name: otel-fintrans-simulator-linux-amd64
+          asset_path: dist/otel-fintrans-simulator-${{ env.IMAGE_TAG }}
+          asset_name: otel-fintrans-simulator-${{ env.IMAGE_TAG }}
           asset_content_type: application/octet-stream
