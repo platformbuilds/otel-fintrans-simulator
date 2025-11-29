@@ -89,8 +89,10 @@ go build -o bin/otel-fintrans-simulator cmd/otel-fintrans-simulator/main.go
 # Run with default settings (sends to localhost:4317)
 ./bin/otel-fintrans-simulator
 
-# Run with custom OTLP endpoint
-OTEL_EXPORTER_OTLP_ENDPOINT=http://my-collector:4317 ./bin/otel-fintrans-simulator
+# Run with custom OTLP endpoint (configured via simulator-config.yaml)
+# Edit `simulator-config.yaml` and set `telemetry.endpoint: "http://my-collector:4317"` and optionally `telemetry.insecure: true`.
+# Then run normally:
+./bin/otel-fintrans-simulator
 
 # Run with specific transaction rate
 TRANSACTION_RATE=100 ./bin/otel-fintrans-simulator
@@ -106,7 +108,9 @@ TRANSACTION_RATE=100 ./bin/otel-fintrans-simulator
 
 Environment variables:
 
-- `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP collector endpoint (default: `http://localhost:4317`)
+Telemetry endpoint
+- `telemetry.endpoint`: OTLP collector endpoint (default: `http://localhost:4317` when not set in config)
+- `telemetry.insecure`: whether to use an insecure (no-TLS) OTLP connection (default: true)
 Telemetry outputs
 -----------------
 Telemetry outputs are configured via the `telemetry.outputs` field in `simulator-config.yaml` (no CLI override).

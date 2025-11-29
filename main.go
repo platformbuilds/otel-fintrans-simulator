@@ -98,8 +98,6 @@ func main() {
 		failureRate        = flag.Float64("failure-rate", 0.1, "Failure rate (0.0-1.0)")
 		minAmountPaise     = flag.Int64("min-amount-paisa", 10000, "Minimum transaction amount in paise (₹100.00)")
 		maxAmountPaise     = flag.Int64("max-amount-paisa", 1000000, "Maximum transaction amount in paise (₹10,000.00)")
-		otlpEndpoint       = flag.String("otlp-endpoint", "localhost:4317", "OTLP endpoint")
-		otlpInsecure       = flag.Bool("otlp-insecure", true, "Use insecure OTLP connection")
 		concurrency        = flag.Int("concurrency", 10, "Number of concurrent transactions")
 		timeWindowStr      = flag.String("time-window", "0s", "Time window to spread data over (e.g., 15m, 1h, 0s=instant)")
 		dataIntervalStr    = flag.String("data-interval", "30s", "Time interval between data points (e.g., 10s, 1m)")
@@ -181,7 +179,17 @@ func main() {
 		}
 	}
 
-	shutdown, err := initOTel(ctx, *otlpEndpoint, *otlpInsecure, telemetryOutputs)
+	// derive endpoint and insecure option from config (defaults if absent)
+	endpoint := "localhost:4317"
+	insecure := true
+	if cfg != nil {
+		if cfg.Telemetry.Endpoint != "" {
+			endpoint = cfg.Telemetry.Endpoint
+		}
+		insecure = cfg.Telemetry.Insecure
+	}
+
+	shutdown, err := initOTel(ctx, endpoint, insecure, telemetryOutputs)
 	if err != nil {
 		log.Fatalf("Failed to initialize OpenTelemetry: %v", err)
 	}

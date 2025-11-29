@@ -13,7 +13,7 @@ run:
 
 localdev-sim: build
 	# Quick local dev run against no-op logging / default OTLP endpoint
-	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 ./bin/otel-fintrans-simulator --transactions 10 --log-output stdout
+	./bin/otel-fintrans-simulator --transactions 10 --log-output stdout
 
 tidy:
 	go mod tidy

@@ -36,6 +36,10 @@ type TelemetryConfig struct {
 	// Outputs controls where telemetry is shipped. Supported values: "otlp", "stdout".
 	// Multiple outputs may be specified, e.g. ["otlp","stdout"]
 	Outputs []string `yaml:"outputs,omitempty"`
+	// Endpoint for OTLP exporter. Example: "http://localhost:4317"
+	Endpoint string `yaml:"endpoint,omitempty"`
+	// Whether to use insecure OTLP connection (no TLS). Default: true
+	Insecure bool `yaml:"insecure,omitempty"`
 }
 
 // Burst describes a temporary window where failure probability is increased.

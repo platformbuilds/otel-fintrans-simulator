@@ -19,6 +19,8 @@ telemetry:
     transaction_amount_paisa_count: "transaction_amount_paisa_count"
 
   outputs: ["otlp", "stdout"]
+  endpoint: "http://localhost:4317"
+  insecure: true
 
 failure:
   mode: "bursty"
