@@ -98,8 +98,17 @@ jobs:
           tags: ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}
           platforms: linux/${{ github.event.inputs.platform }}
 
-      - name: DockerHub: login (conditional)
-        if: ${{ github.event.inputs.push_image == 'true' && github.event.inputs.dockerhub_repository != '' }}
+      - name: Set DockerHub repository (default to current repo if input not provided)
+        if: ${{ github.event.inputs.push_image == 'true' }}
+        run: |
+          if [ -n "${{ github.event.inputs.dockerhub_repository }}" ]; then
+            echo "DOCKERHUB_REPO=${{ github.event.inputs.dockerhub_repository }}" >> $GITHUB_ENV
+          else
+            echo "DOCKERHUB_REPO=${{ github.repository }}" >> $GITHUB_ENV
+          fi
+
+      - name: DockerHub login (conditional)
+        if: ${{ github.event.inputs.push_image == 'true' && secrets.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v2
         with:
           registry: docker.io
@@ -107,12 +116,12 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push image to DockerHub (conditional)
-        if: ${{ github.event.inputs.push_image == 'true' && github.event.inputs.dockerhub_repository != '' }}
+        if: ${{ github.event.inputs.push_image == 'true' && secrets.DOCKERHUB_TOKEN != '' }}
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
-          tags: docker.io/${{ github.event.inputs.dockerhub_repository }}:${{ env.IMAGE_TAG }}
+          tags: docker.io/${{ env.DOCKERHUB_REPO }}:${{ env.IMAGE_TAG }}
           platforms: linux/${{ github.event.inputs.platform }}
 
       - name: Create GitHub Release
