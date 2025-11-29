@@ -107,7 +107,6 @@ func main() {
 		configPath         = flag.String("config", "", "Path to optional simulator YAML configuration file")
 		randSeed           = flag.Int64("rand-seed", 0, "Optional seed for RNG to make runs deterministic")
 		logOutput          = flag.String("log-output", "nop", "Logger output: 'nop' (default) or 'stdout')")
-		telemetryOutput    = flag.String("telemetry-output", "", "Telemetry outputs: otlp|stdout|both (overrides config)")
 	)
 	flag.Parse()
 
@@ -149,11 +148,8 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	// Determine telemetry outputs: flag overrides config
+	// determine telemetry outputs from configuration (simulator-config.yaml)
 	telemetryOutputs := ""
-	if *telemetryOutput != "" {
-		telemetryOutputs = *telemetryOutput
-	}
 	// flag wasn't added yet - read from env var or config
 	// We'll allow a flag later; for now, prefer config if present
 	if len(cfg.Telemetry.Outputs) > 0 {

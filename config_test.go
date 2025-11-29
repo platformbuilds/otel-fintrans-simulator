@@ -25,6 +25,10 @@ func TestLoadConfig_example(t *testing.T) {
 		t.Fatalf("expected at least one burst in example config")
 	}
 
+	if len(cfg.Telemetry.Outputs) == 0 {
+		t.Fatalf("expected telemetry.outputs to be set in example config")
+	}
+
 	// check that burst start/duration parseable by creating scheduler
 	_, err = newFailureScheduler(cfg.Failure, time.Now())
 	if err != nil {

@@ -109,7 +109,7 @@ Environment variables:
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP collector endpoint (default: `http://localhost:4317`)
 Telemetry outputs
 -----------------
-You can control where telemetry is shipped using the `--telemetry-output` CLI flag or the `telemetry.outputs` field in `simulator-config.yaml`.
+Telemetry outputs are configured via the `telemetry.outputs` field in `simulator-config.yaml` (no CLI override).
 
 Supported values (single or combined):
 - `otlp` — send traces, metrics and logs to the configured OTLP endpoint (default)
@@ -118,16 +118,9 @@ Supported values (single or combined):
 
 Examples:
 
-```bash
-# use OTLP only (default)
-./bin/otel-fintrans-simulator --telemetry-output otlp
+1) Use the default OTLP exporter (no change): keep `telemetry.outputs` empty / absent and the simulator will send telemetry to the OTLP endpoint.
 
-# write traces/metrics to stdout and logs to stdout
-./bin/otel-fintrans-simulator --telemetry-output stdout
-
-# send to both collector and stdout
-./bin/otel-fintrans-simulator --telemetry-output both
-```
+2) Use stdout-only or both: edit `simulator-config.yaml` and add `telemetry.outputs: ["stdout"]` or `telemetry.outputs: ["otlp","stdout"]` for the desired behavior (then start simulator normally).
 
 - `OTEL_SERVICE_NAME`: Service name for root traces (default: `api-gateway`)
 - `TRANSACTION_RATE`: Transactions per second (default: `10`)
