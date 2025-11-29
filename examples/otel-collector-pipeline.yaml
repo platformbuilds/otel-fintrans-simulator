@@ -1,0 +1,20 @@
+receivers:
+  otlp:
+    protocols:
+      grpc: {}
+
+exporters:
+  logging:
+    logLevel: info
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [logging]
+    metrics:
+      receivers: [otlp]
+      exporters: [logging]
+
+# Example usage: run local collector with this pipeline and start simulator pointing at it
+# otelcol --config examples/otel-collector-pipeline.yaml
