@@ -220,6 +220,28 @@ CI status
 ---------
 We've added a lightweight GitHub Actions workflow `.github/workflows/ci.yml` that runs `go test ./...`, `gofmt` checks, and `go vet` on pushes and PRs to `main`.
 
+Releases & CI manual trigger
+---------------------------
+The repository includes a manual release workflow you can trigger from the GitHub Actions UI (Actions → CI → Run workflow). The workflow builds a platform-tagged binary and (optionally) builds & pushes a container image to GHCR and DockerHub.
+
+Required inputs when running the workflow manually:
+- `release_tag` (required) — the version that will be used for the release and image tag (for example `v1.0.0`).
+- `push_image` (optional, default true) — whether to build & push container images.
+- `platform` (optional, default `amd64`) — architecture part of the image tag, used for GOARCH and image tag.
+- `dockerhub_repository` (optional) — `owner/repo` on Docker Hub if you want the workflow to push to Docker Hub in addition to GHCR.
+
+Secrets / permissions
+- GHCR: the workflow uses the repository's `GITHUB_TOKEN` to push container images to GitHub Container Registry. The workflow requests `packages: write` permission.
+- DockerHub: if you want the CI to push images to Docker Hub, set these repository secrets:
+  - `DOCKERHUB_USERNAME`
+  - `DOCKERHUB_TOKEN` (or personal access token)
+
+Image / asset naming
+- Container image tag format: `{release_tag}-{platform}` (e.g. `v1.0.0-amd64`) — pushed as `ghcr.io/<owner>/<repo>:<tag>` and, if enabled, `docker.io/<dockerhub_repository>:<tag>`.
+- Release binary asset name: `otel-fintrans-simulator-{release_tag}-{platform}` (uploaded to the GitHub Release created by the workflow).
+
+NOTE: The manual release workflow is currently restricted to the repository owner when invoked from the UI; if you want to allow additional actors or enable automatic tag-driven releases, I can update the workflow accordingly.
+
 9. Add a convenient local-dev Make target
   - `make localdev-sim` or `make run-simulator` that builds and runs the simulator against a local collector or logs to stdout for quick demos.
 
