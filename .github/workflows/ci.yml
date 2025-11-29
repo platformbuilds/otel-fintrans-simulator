@@ -95,7 +95,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}
+          tags: ghcr.io/platformbuilds/otel-fintrans-simulator:${{ env.IMAGE_TAG }}
           platforms: linux/${{ github.event.inputs.platform }}
 
       - name: Set DockerHub repository (default to current repo if input not provided)
@@ -104,7 +104,8 @@ jobs:
           if [ -n "${{ github.event.inputs.dockerhub_repository }}" ]; then
             echo "DOCKERHUB_REPO=${{ github.event.inputs.dockerhub_repository }}" >> $GITHUB_ENV
           else
-            echo "DOCKERHUB_REPO=${{ github.repository }}" >> $GITHUB_ENV
+            # default dockerhub repo prefix to platformbuilds/<repo>
+            echo "DOCKERHUB_REPO=platformbuilds/otel-fintrans-simulator" >> $GITHUB_ENV
           fi
 
       - name: DockerHub login (conditional)
