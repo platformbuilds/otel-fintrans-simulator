@@ -147,6 +147,16 @@ jobs:
           release_name: Release ${{ github.event.inputs.release_tag }}
           body: "Automated release from CI — build, container (optional), and artifacts created."
 
+      - name: Verify release artifact exists
+        run: |
+          echo "Checking for built artifact: dist/otel-fintrans-simulator-${IMAGE_TAG}"
+          ls -la dist || (echo "dist directory is missing" && exit 1)
+          if [ ! -f "dist/otel-fintrans-simulator-${IMAGE_TAG}" ]; then
+            echo "ERROR: expected artifact 'dist/otel-fintrans-simulator-${IMAGE_TAG}' not found."
+            echo "Directory contents:" && ls -la dist || true
+            exit 1
+          fi
+
       - name: Upload binary to release
         uses: actions/upload-release-asset@v1
         with:
