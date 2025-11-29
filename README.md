@@ -10,7 +10,7 @@ This simulator generates realistic OpenTelemetry metrics, logs, and traces for a
 
 ## Hardcoded Values - Exemption Rationale
 
-**NOTE (HCB-008)**: This simulator contains hardcoded metric names, service names, and transaction attributes **by design**. This is an **approved exemption** from the AGENTS.md §3.6 rule against hardcoding for the following reasons:
+**NOTE (HCB-008)**: Historically this simulator contained hardcoded metric names, service names, and transaction attributes **by design**. This remains an approved exemption from AGENTS.md §3.6 for simulation fidelity, however the simulator now supports a fully-configurable domain model via `simulator-config.yaml` or the `--config` CLI flag. The values listed below are the default names the simulator uses when no config is provided.
 
 ### Why Hardcoding is Acceptable Here
 
@@ -22,9 +22,9 @@ This simulator generates realistic OpenTelemetry metrics, logs, and traces for a
 
 4. **Self-Contained**: The simulator does not couple to or influence the behavior of the correlation/RCA engines, which remain registry-driven.
 
-### Hardcoded Elements (Approved)
+### Default elements (configurable)
 
-The following hardcoded elements are **permitted** in this simulator:
+The following default elements are included for simulation fidelity and are used when no configuration is supplied. All of these defaults can be overridden using `simulator-config.yaml` (see `telemetry.service_names` and `telemetry.metric_names`) or via CLI flags where applicable.
 
 #### Metric Names
 - `transactions_total`
@@ -37,13 +37,13 @@ The following hardcoded elements are **permitted** in this simulator:
 - `transaction_amount_paisa_sum`
 - `transaction_amount_paisa_count`
 
-#### Service Names
+#### Service Names (defaults)
 - `api-gateway`
 - `tps` (Transaction Processing Service)
 - `postgres` (Database)
 - `kafka` (Message queue)
 
-#### Transaction Attributes
+#### Transaction Attributes (defaults)
 - `transaction.id`
 - `transaction.type` (UPI, CREDIT_CARD, DEBIT_CARD, NETBANKING, WALLET)
 - `transaction.status` (SUCCESS, FAILED, PENDING)
@@ -58,13 +58,13 @@ The following hardcoded elements are **permitted** in this simulator:
 - `telemetry.sdk.language`
 - `telemetry.sdk.version`
 
-### Migration Path
+### Configuration and migration path
 
-If you need to **customize** the simulator's domain model:
+If you need to **customize** the simulator's domain model (preferred):
 
-1. Extract hardcoded values to a `simulator-config.yaml` file
-2. Load configuration at startup
-3. Generate telemetry based on loaded config
+1. Edit the default `simulator-config.yaml` in this repository (or create your own) to override `telemetry.service_names`, `telemetry.metric_names`, or `telemetry.outputs`.
+2. Start the simulator using `--config ./simulator-config.yaml` (or point it at your config path).
+3. The simulator will read your config and generate telemetry using the configured names and failure schedules. When `telemetry.outputs` includes `stdout` the simulator will also print telemetry to stdout in a readable format.
 
 This is **not required** for the current use case but provides a path forward if simulation needs diversify.
 
