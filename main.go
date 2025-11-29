@@ -15,8 +15,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	otlploghttp "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	otlpmetrichttp "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	otlptracehttp "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	stdoutmetric "go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	stdouttrace "go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/log/global"
@@ -29,8 +32,13 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"net/url"
+	"crypto/tls"
+	"net/http"
+	"strings"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	grpccreds "google.golang.org/grpc/credentials"
 )
 
 const (
@@ -189,7 +197,12 @@ func main() {
 		insecure = cfg.Telemetry.Insecure
 	}
 
-	shutdown, err := initOTel(ctx, endpoint, insecure, telemetryOutputs)
+	skipVerify := false
+	if cfg != nil {
+		skipVerify = cfg.Telemetry.SkipTLSVerify
+	}
+
+	shutdown, err := initOTel(ctx, endpoint, insecure, skipVerify, telemetryOutputs)
 	if err != nil {
 		log.Fatalf("Failed to initialize OpenTelemetry: %v", err)
 	}
@@ -262,7 +275,7 @@ func main() {
 	log.Println("Simulation completed")
 }
 
-func initOTel(ctx context.Context, endpoint string, insecureConn bool, outputs string) (func(context.Context) error, error) {
+func initOTel(ctx context.Context, endpoint string, insecureConn bool, skipVerify bool, outputs string) (func(context.Context) error, error) {
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName("fintrans-simulator"),
@@ -273,9 +286,36 @@ func initOTel(ctx context.Context, endpoint string, insecureConn bool, outputs s
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
+	// Choose protocol based on endpoint string or default port
+	protocol := "grpc"
+	epHost := endpoint
+	if u, err := url.Parse(endpoint); err == nil {
+		if u.Scheme == "http" || u.Scheme == "https" {
+			protocol = "http"
+			epHost = u.Host
+		}
+	}
+	if protocol != "http" {
+		// fall back to port-based heuristic
+		if strings.Contains(endpoint, ":4318") {
+			protocol = "http"
+		}
+	}
+
+	// gRPC dial options (for gRPC exporters)
 	opts := []grpc.DialOption{}
-	if insecureConn {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if protocol == "grpc" {
+		if insecureConn {
+			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		} else if skipVerify {
+			// Use TLS but skip verification
+			creds := grpccreds.NewTLS(&tls.Config{InsecureSkipVerify: true})
+			opts = append(opts, grpc.WithTransportCredentials(creds))
+		} else {
+			// Use default TLS
+			creds := grpccreds.NewClientTLSFromCert(nil, "")
+			opts = append(opts, grpc.WithTransportCredentials(creds))
+		}
 	}
 
 	// Determine if we should set up OTLP and/or stdout exporters
@@ -283,23 +323,40 @@ func initOTel(ctx context.Context, endpoint string, insecureConn bool, outputs s
 	wantStdout := outputs == "stdout" || outputs == "both"
 
 	// Trace exporter(s)
-	traceOpts := []otlptracegrpc.Option{
-		otlptracegrpc.WithEndpoint(endpoint),
-		otlptracegrpc.WithDialOption(opts...),
-	}
-	if insecureConn {
-		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
-	}
 	var traceExporters []sdktrace.SpanProcessor
 	var tracerProvider *sdktrace.TracerProvider
 	if wantOTLP {
-		traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create trace exporter: %w", err)
+		if protocol == "grpc" {
+			traceOpts := []otlptracegrpc.Option{
+				otlptracegrpc.WithEndpoint(epHost),
+				otlptracegrpc.WithDialOption(opts...),
+			}
+			if insecureConn {
+				traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
+			}
+			traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create trace exporter: %w", err)
+			}
+			traceExporters = append(traceExporters, sdktrace.NewBatchSpanProcessor(traceExporter))
+		} else {
+			// HTTP exporter
+			traceHTTPOpts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(epHost)}
+			if insecureConn {
+				traceHTTPOpts = append(traceHTTPOpts, otlptracehttp.WithInsecure())
+			}
+			if !insecureConn && skipVerify {
+				// create client that skips TLS verification
+				client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+				traceHTTPOpts = append(traceHTTPOpts, otlptracehttp.WithHTTPClient(client))
+			}
+			traceExporter, err := otlptracehttp.New(ctx, traceHTTPOpts...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create HTTP trace exporter: %w", err)
+			}
+			traceExporters = append(traceExporters, sdktrace.NewBatchSpanProcessor(traceExporter))
 		}
-		traceExporters = append(traceExporters, sdktrace.NewBatchSpanProcessor(traceExporter))
 	}
-
 	if wantStdout {
 		// stdout trace exporter (pretty)
 		stExporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
@@ -319,20 +376,36 @@ func initOTel(ctx context.Context, endpoint string, insecureConn bool, outputs s
 	otel.SetTracerProvider(tracerProvider)
 
 	// Metric exporter
-	metricOpts := []otlpmetricgrpc.Option{
-		otlpmetricgrpc.WithEndpoint(endpoint),
-		otlpmetricgrpc.WithDialOption(opts...),
-	}
-	if insecureConn {
-		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())
-	}
 	var metricReaders []sdkmetric.Reader
 	if wantOTLP {
-		metricExporter, err := otlpmetricgrpc.New(ctx, metricOpts...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create metric exporter: %w", err)
+		if protocol == "grpc" {
+			metricOpts := []otlpmetricgrpc.Option{
+				otlpmetricgrpc.WithEndpoint(epHost),
+				otlpmetricgrpc.WithDialOption(opts...),
+			}
+			if insecureConn {
+				metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())
+			}
+			metricExporter, err := otlpmetricgrpc.New(ctx, metricOpts...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create metric exporter: %w", err)
+			}
+			metricReaders = append(metricReaders, sdkmetric.NewPeriodicReader(metricExporter))
+		} else {
+			metricHTTPOpts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(epHost)}
+			if insecureConn {
+				metricHTTPOpts = append(metricHTTPOpts, otlpmetrichttp.WithInsecure())
+			}
+			if !insecureConn && skipVerify {
+				client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+				metricHTTPOpts = append(metricHTTPOpts, otlpmetrichttp.WithHTTPClient(client))
+			}
+			metricExporter, err := otlpmetrichttp.New(ctx, metricHTTPOpts...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create HTTP metric exporter: %w", err)
+			}
+			metricReaders = append(metricReaders, sdkmetric.NewPeriodicReader(metricExporter))
 		}
-		metricReaders = append(metricReaders, sdkmetric.NewPeriodicReader(metricExporter))
 	}
 
 	if wantStdout {
@@ -354,27 +427,52 @@ func initOTel(ctx context.Context, endpoint string, insecureConn bool, outputs s
 	otel.SetMeterProvider(meterProvider)
 
 	// Log exporter
-	logOpts := []otlploggrpc.Option{
-		otlploggrpc.WithEndpoint(endpoint),
-		otlploggrpc.WithDialOption(opts...),
-	}
-	if insecureConn {
-		logOpts = append(logOpts, otlploggrpc.WithInsecure())
+	var logOptsGRPC []otlploggrpc.Option
+	var logHTTPOpts []otlploghttp.Option
+	if protocol == "grpc" {
+		logOptsGRPC = []otlploggrpc.Option{
+			otlploggrpc.WithEndpoint(epHost),
+			otlploggrpc.WithDialOption(opts...),
+		}
+		if insecureConn {
+			logOptsGRPC = append(logOptsGRPC, otlploggrpc.WithInsecure())
+		}
+	} else {
+		logHTTPOpts = []otlploghttp.Option{otlploghttp.WithEndpoint(epHost)}
+		if insecureConn {
+			logHTTPOpts = append(logHTTPOpts, otlploghttp.WithInsecure())
+		}
+		if !insecureConn && skipVerify {
+			client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+			logHTTPOpts = append(logHTTPOpts, otlploghttp.WithHTTPClient(client))
+		}
 	}
 	// log exporter (created only if OTLP chosen below)
 
 	// For logs: if OTLP requested create the OTLP exporter; for stdout we rely on simulator logger (stdout) for simpler behaviour.
 	var logProvider *sdklog.LoggerProvider
 	if wantOTLP {
-		logExporter, err := otlploggrpc.New(ctx, logOpts...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create log exporter: %w", err)
+		if protocol == "grpc" {
+			logExporter, err := otlploggrpc.New(ctx, logOptsGRPC...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create log exporter: %w", err)
+			}
+			logProvider = sdklog.NewLoggerProvider(
+				sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+				sdklog.WithResource(res),
+			)
+			global.SetLoggerProvider(logProvider)
+		} else {
+			logExporter, err := otlploghttp.New(ctx, logHTTPOpts...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create HTTP log exporter: %w", err)
+			}
+			logProvider = sdklog.NewLoggerProvider(
+				sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+				sdklog.WithResource(res),
+			)
+			global.SetLoggerProvider(logProvider)
 		}
-		logProvider = sdklog.NewLoggerProvider(
-			sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
-			sdklog.WithResource(res),
-		)
-		global.SetLoggerProvider(logProvider)
 	}
 
 	otel.SetTextMapPropagator(propagation.TraceContext{})

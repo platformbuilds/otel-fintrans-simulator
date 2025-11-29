@@ -21,6 +21,7 @@ telemetry:
   outputs: ["otlp", "stdout"]
   endpoint: "http://localhost:4317"
   insecure: true
+  skip_tls_verify: false
 
 failure:
   mode: "bursty"

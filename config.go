@@ -40,6 +40,8 @@ type TelemetryConfig struct {
 	Endpoint string `yaml:"endpoint,omitempty"`
 	// Whether to use insecure OTLP connection (no TLS). Default: true
 	Insecure bool `yaml:"insecure,omitempty"`
+	// If true and TLS is used, skip TLS certificate verification (InsecureSkipVerify).
+	SkipTLSVerify bool `yaml:"skip_tls_verify,omitempty"`
 }
 
 // Burst describes a temporary window where failure probability is increased.

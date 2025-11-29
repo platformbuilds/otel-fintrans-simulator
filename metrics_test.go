@@ -70,9 +70,35 @@ func TestRunSimulation_StopsOnContextCancel(t *testing.T) {
 func TestInitOTel_stdoutOnly(t *testing.T) {
 	ctx := context.Background()
 	// Request stdout-only; initOTel should succeed without any network calls
-	shutdown, err := initOTel(ctx, "", true, "stdout")
+	shutdown, err := initOTel(ctx, "", true, false, "stdout")
 	if err != nil {
 		t.Fatalf("initOTel stdout failed: %v", err)
+	}
+	if err := shutdown(ctx); err != nil {
+		t.Fatalf("shutdown failed: %v", err)
+	}
+}
+
+func TestInitOTel_httpOnly(t *testing.T) {
+	ctx := context.Background()
+	// HTTP endpoint on 4318 using insecure (http) should initialize without error
+	// use stdout-only to avoid network activity in unit tests; detection logic still exercised
+	shutdown, err := initOTel(ctx, "http://localhost:4318", true, false, "stdout")
+	if err != nil {
+		t.Fatalf("initOTel http failed: %v", err)
+	}
+	if err := shutdown(ctx); err != nil {
+		t.Fatalf("shutdown failed: %v", err)
+	}
+}
+
+func TestInitOTel_httpTLS_skipVerify(t *testing.T) {
+	ctx := context.Background()
+	// HTTPS endpoint with skip-verify should initialize OK (uses custom http client)
+	// use stdout-only to avoid network activity in unit tests; detection logic still exercised
+	shutdown, err := initOTel(ctx, "https://localhost:4318", false, true, "stdout")
+	if err != nil {
+		t.Fatalf("initOTel https skipVerify failed: %v", err)
 	}
 	if err := shutdown(ctx); err != nil {
 		t.Fatalf("shutdown failed: %v", err)
