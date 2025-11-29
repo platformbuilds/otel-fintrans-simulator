@@ -5,6 +5,15 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to create (e.g. v1.2.3)'
+        required: true
+      push_image:
+        description: 'Whether to build and push container image to ghcr (true/false)'
+        required: false
+        default: 'true'
 
 jobs:
   build-and-test:
@@ -38,3 +47,52 @@ jobs:
 
       - name: Run go vet
         run: go vet ./...
+
+  release:
+    name: Release (manual)
+    runs-on: ubuntu-latest
+    # Only allow owner of the repository to trigger this manual release job
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == 'platformbuilds' }}
+    needs: build-and-test
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.24
+
+      - name: Build binary
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o dist/otel-fintrans-simulator
+
+      - name: Build and push container (GHCR)
+        if: ${{ github.event.inputs.push_image == 'true' }}
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.event.inputs.release_tag }}
+          platforms: linux/amd64
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          release_name: Release ${{ github.event.inputs.release_tag }}
+          body: "Automated release from CI — build, container (optional), and artifacts created."
+
+      - name: Upload binary to release
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/otel-fintrans-simulator
+          asset_name: otel-fintrans-simulator-linux-amd64
+          asset_content_type: application/octet-stream
