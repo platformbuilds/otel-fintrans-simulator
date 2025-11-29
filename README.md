@@ -49,9 +49,16 @@ TRANSACTION_RATE=100 ./bin/otel-fintrans-simulator
 Environment variables:
 
 Telemetry endpoint & protocol
-- `telemetry.endpoint`: OTLP collector endpoint (default: `http://localhost:4317` when not set in config). The simulator supports both gRPC (default port 4317) and HTTP/OTLP (default port 4318).
+- `telemetry.endpoint`: OTLP collector endpoint (default: `localhost:4317` when not set in config). The simulator supports both gRPC (default port 4317) and HTTP/OTLP (default port 4318).
 - `telemetry.insecure`: when true, use plaintext (no TLS) for the selected protocol (default: true).
 - `telemetry.skip_tls_verify`: when using TLS, set to `true` to skip certificate verification (InsecureSkipVerify). Default: false.
+Validation & helpful warnings
+-----------------------------
+The simulator performs lightweight validation of your `telemetry` settings at startup and logs warnings for inconsistent combinations. Examples:
+
+- `telemetry.endpoint` uses `http://` but `telemetry.insecure=false` — HTTP is plaintext; either set `telemetry.insecure: true` or use `https://` for TLS.
+- `telemetry.endpoint` uses `https://` but `telemetry.insecure=true` — that's inconsistent; either set `telemetry.insecure: false` to use TLS or change the endpoint scheme to `http://`.
+- `telemetry.skip_tls_verify` is ignored when `telemetry.insecure` is `true` (plaintext).
 Telemetry outputs
 -----------------
 Telemetry outputs are configured via the `telemetry.outputs` field in `simulator-config.yaml` (no CLI override).
