@@ -59,8 +59,10 @@ jobs:
   release:
     name: Release (manual)
     runs-on: ubuntu-latest
-    # Only allow owner of the repository to trigger this manual release job
-    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == 'platformbuilds' }}
+    # Allow manual trigger via the Actions Run workflow UI so the owner may
+    # specify `release_tag` at invocation time. We intentionally accept any
+    # workflow_dispatch trigger here (permissions are still enforced by GitHub)
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     needs: build-and-test
     permissions:
       contents: write
