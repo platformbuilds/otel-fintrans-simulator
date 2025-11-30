@@ -18,13 +18,15 @@ telemetry:
     transaction_amount_paisa_sum: "transaction_amount_paisa_sum"
     transaction_amount_paisa_count: "transaction_amount_paisa_count"
 
-  outputs: ["otlp", "stdout"]
+  # outputs: ["otlp", "stdout"]
+  outputs: ["otlp"]
+  
   # For gRPC/OTLP use the canonical host:port form (no http:// scheme)
   # For example (gRPC): localhost:4317
   # For OTLP/HTTP use http(s) on port 4318, e.g. http://localhost:4318
-  endpoint: "localhost:4317"
+  endpoint: "127.0.0.1:4317"
   insecure: true
-  skip_tls_verify: false
+  # skip_tls_verify: false
 
 failure:
   mode: "bursty"
