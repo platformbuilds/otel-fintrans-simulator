@@ -3,7 +3,8 @@
 all: build
 
 build:
-	go build -o bin/otel-fintrans-simulator main.go
+	# Build the whole package (not a single file) so all sources in package main are compiled
+	go build -o bin/otel-fintrans-simulator .
 
 test:
 	go test ./...
