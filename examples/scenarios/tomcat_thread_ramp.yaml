@@ -1,0 +1,32 @@
+# Full example config: Tomcat load ramp scenario
+telemetry:
+  service_names:
+    api_gateway: "api-gateway"
+
+  metric_names:
+    tomcat_threads_busy_threads: "tomcat_threads_busy_threads"
+    tomcat_threads_queue_seconds: "tomcat_threads_queue_seconds"
+
+  labels:
+    org_ids: ["bank_02", "bank_04"]
+
+  outputs: ["otlp"]
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+
+failure:
+  mode: "bursty"
+  rate: 0.01
+  scenarios:
+    - name: "tomcat_thread_ramp"
+      start: "0s"
+      duration: "120s"
+      labels:
+        OrgId: ["bank_02", "bank_04"]
+      effects:
+        - metric: "tomcat_threads"
+          op: "ramp"
+          step: 2
+        - metric: "tomcat_threads_queue_seconds"
+          op: "add"
+          value: 5

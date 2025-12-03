@@ -1,0 +1,36 @@
+# Full example config: Kafka disk/storage failure — increases errors and URP
+telemetry:
+  service_names:
+    api_gateway: "api-gateway"
+    kafka_producer: "kafka-producer"
+    kafka_consumer: "kafka-consumer"
+
+  metric_names:
+    kafka_produce_total: "kafka_produce_total"
+    kafka_consume_total: "kafka_consume_total"
+    kafka_controller_UnderReplicatedPartitions: "kafka_controller_UnderReplicatedPartitions"
+    kafka_network_RequestMetrics_RequestsPerSec: "kafka_network_RequestMetrics_RequestsPerSec"
+
+  labels:
+    org_ids: ["bank_01", "bank_02", "bank_03"]
+
+  outputs: ["otlp"]
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+
+failure:
+  mode: "bursty"
+  rate: 0.02
+  scenarios:
+    - name: "kafka_disk_issue"
+      start: "0s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_01"]
+      effects:
+        - metric: "kafka_disk_failure"
+          op: "scale"
+          value: 4.0
+        - metric: "kafka_controller_UnderReplicatedPartitions"
+          op: "add"
+          value: 10

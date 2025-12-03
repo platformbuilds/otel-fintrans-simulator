@@ -1,0 +1,33 @@
+# Full example config: Kafka mixed-signals scenario (errors up, throughput down)
+telemetry:
+  service_names:
+    kafka_producer: "kafka-producer"
+    kafka_consumer: "kafka-consumer"
+
+  metric_names:
+    kafka_network_RequestMetrics_RequestsPerSec: "kafka_network_RequestMetrics_RequestsPerSec"
+    kafka_controller_UnderReplicatedPartitions: "kafka_controller_UnderReplicatedPartitions"
+
+  labels:
+    org_ids: ["bank_01", "bank_02"]
+
+  outputs: ["otlp"]
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+
+failure:
+  mode: "bursty"
+  rate: 0.02
+  scenarios:
+    - name: "kafka_mixed_signals"
+      start: "0s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_01"]
+      effects:
+        - metric: "kafka_disk_failure"
+          op: "scale"
+          value: 4.0
+        - metric: "kafka_throughput"
+          op: "scale"
+          value: 0.2

@@ -1,0 +1,32 @@
+# Full example config: Kafka URP burst (controller instability)
+telemetry:
+  service_names:
+    kafka_producer: "kafka-producer"
+    kafka_consumer: "kafka-consumer"
+
+  metric_names:
+    kafka_controller_UnderReplicatedPartitions: "kafka_controller_UnderReplicatedPartitions"
+
+  labels:
+    org_ids: ["bank_01", "bank_03"]
+
+  outputs: ["otlp"]
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+
+failure:
+  mode: "bursty"
+  rate: 0.01
+  scenarios:
+    - name: "kafka_underreplicated_burst"
+      start: "0s"
+      duration: "60s"
+      labels:
+        OrgId: ["bank_01", "bank_03"]
+      effects:
+        - metric: "kafka_controller_UnderReplicatedPartitions"
+          op: "add"
+          value: 5
+        - metric: "transaction_failures"
+          op: "scale"
+          value: 6.0

@@ -1,0 +1,37 @@
+# Full example config: Partial composite outage affecting bank_03
+telemetry:
+  service_names:
+    api_gateway: "api-gateway"
+    kafka_producer: "kafka-producer"
+    kafka_consumer: "kafka-consumer"
+
+  metric_names:
+    kafka_controller_UnderReplicatedPartitions: "kafka_controller_UnderReplicatedPartitions"
+    db_latency_seconds: "db_latency_seconds"
+
+  labels:
+    org_ids: ["bank_01", "bank_02", "bank_03"]
+
+  outputs: ["otlp"]
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+
+failure:
+  mode: "bursty"
+  rate: 0.02
+  scenarios:
+    - name: "partial_outage_bank03"
+      start: "0s"
+      duration: "120s"
+      labels:
+        OrgId: ["bank_03"]
+      effects:
+        - metric: "kafka_controller_UnderReplicatedPartitions"
+          op: "add"
+          value: 3
+        - metric: "db_latency"
+          op: "scale"
+          value: 6.0
+        - metric: "transaction_failures"
+          op: "scale"
+          value: 8.0

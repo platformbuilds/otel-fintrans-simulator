@@ -152,6 +152,464 @@ failure:
 
 When a scenario is active the simulator applies its effects to the runtime state during each background tick. You can mix bursts (simple failure-rate multipliers) with scenario windows for rich, realistic fault patterns.
 
+Hardware-fault scenarios
+------------------------
+In addition to service- and KPI-focused scenarios, the simulator now supports hardware/infra-fault style effects. These simulate problems such as disk failures impacting Kafka or a bad memory module impacting in-memory datastores (KeyDB/valkey). Example metric names you can use in scenario `effects` include:
+- `kafka_disk_failure` — drives increased Kafka produce/consume errors and ISR noise
+- `keydb_memory_fault` / `valkey_bad_memory` — drives KeyDB/valkey operation failures and increases redis memory/error signals
+
+Use these effects to model outages that originate in underlying infrastructure (hardware, nodes, network) rather than just service deployments.
+
+Network-fault scenarios
+-----------------------
+We also support network-specific scenarios to simulate packet drops and network-induced latency — useful when failures originate from unreliable network interfaces, congested links, or router problems. Typical metric names for scenario effects:
+- `network_latency` / `node_network_latency_ms` — scales up simulated network latency (affects produce/consume and API gateway processing)
+- `network_packet_drop` / `node_network_packet_drops_total` — increases packet drop counts and causes higher messaging errors
+
+When these scenarios are active the simulator increases network latency on affected nodes and emits packet drop counters. That also increases Kafka/consumer errors and may cascade into higher transaction failures.
+
+Scenario examples — copy/paste ready
+-----------------------------------
+Below are practical, ready-to-use scenario YAML snippets you can copy into `failure.scenarios` in your `simulator-config.yaml`. These show how to simulate common outage classes — service deployment problems, hardware failures, memory faults, and network problems.
+
+1) Database slowdown / deployment outage
+```yaml
+- name: "db_slow_cascade"
+  start: "5s"
+  duration: "60s"
+  labels:
+    OrgId: ["bank_01", "bank_02"]
+  effects:
+    - metric: "db_latency"
+      op: "scale"
+      value: 5.0
+    - metric: "transaction_failures"
+      op: "scale"
+      value: 4.0
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/db_slow_cascade.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "db_slow_cascade"
+      start: "0s"
+      duration: "60s"
+      labels:
+        OrgId: ["bank_01", "bank_02"]
+      effects:
+        - metric: "db_latency"
+          op: "scale"
+          value: 5.0
+        - metric: "transaction_failures"
+          op: "scale"
+          value: 4.0
+YAML
+
+# start simulator with the scenario (stdout) -- use rand-seed for reproducibility
+TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config /tmp/db_slow_cascade.yaml --log-output stdout --rand-seed 12345
+```
+
+2) Kafka disk / storage failure (hardware-originating outage)
+```yaml
+- name: "kafka_disk_issue"
+  start: "0s"
+  duration: "90s"
+  labels:
+    OrgId: ["bank_01"]
+  effects:
+    - metric: "kafka_disk_failure"   # simulator maps this to higher kafka errors + ISR noise
+      op: "scale"
+      value: 4.0
+    - metric: "kafka_controller_UnderReplicatedPartitions"
+      op: "add"
+      value: 10
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/kafka_disk_issue.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "kafka_disk_issue"
+      start: "0s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_01"]
+      effects:
+        - metric: "kafka_disk_failure"
+          op: "scale"
+          value: 4.0
+        - metric: "kafka_controller_UnderReplicatedPartitions"
+          op: "add"
+          value: 10
+YAML
+
+TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config /tmp/kafka_disk_issue.yaml --log-output stdout --rand-seed 12345
+```
+
+3) KeyDB / valkey memory fault (bad RAM causing in-memory DB failures)
+```yaml
+- name: "keydb_memory_corruption"
+  start: "0s"
+  duration: "2m"
+  labels:
+    OrgId: ["bank_02"]
+  effects:
+    - metric: "keydb_memory_fault"  # increases KeyDB failures and redis miss/eviction noise
+      op: "scale"
+      value: 5.0
+    - metric: "redis_memory"
+      op: "scale"
+      value: 2.5
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/keydb_memory_corruption.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "keydb_memory_corruption"
+      start: "0s"
+      duration: "2m"
+      labels:
+        OrgId: ["bank_02"]
+      effects:
+        - metric: "keydb_memory_fault"
+          op: "scale"
+          value: 5.0
+        - metric: "redis_memory"
+          op: "scale"
+          value: 2.5
+YAML
+
+TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config /tmp/keydb_memory_corruption.yaml --log-output stdout --rand-seed 12345
+```
+
+4) Network packet loss
+```yaml
+- name: "network_packet_loss"
+  start: "30s"
+  duration: "90s"
+  labels:
+    OrgId: ["bank_03"]
+  effects:
+    - metric: "network_packet_drop"
+      op: "scale"
+      value: 6.0
+    - metric: "node_network_packet_drops_total"
+      op: "add"
+      value: 10
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/network_packet_loss.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "network_packet_loss"
+      start: "0s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_03"]
+      effects:
+        - metric: "network_packet_drop"
+          op: "scale"
+          value: 6.0
+        - metric: "node_network_packet_drops_total"
+          op: "add"
+          value: 10
+YAML
+
+TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config /tmp/network_packet_loss.yaml --log-output stdout --rand-seed 12345
+```
+
+5) Network latency spike
+```yaml
+- name: "network_latency_spike"
+  start: "45s"
+  duration: "1m30s"
+  labels:
+    OrgId: ["bank_02"]
+  effects:
+    - metric: "network_latency"   # scales node-level network latency (ms)
+      op: "scale"
+      value: 5.0
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/network_latency_spike.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "network_latency_spike"
+      start: "0s"
+      duration: "1m30s"
+      labels:
+        OrgId: ["bank_02"]
+      effects:
+        - metric: "network_latency"
+          op: "scale"
+          value: 5.0
+YAML
+
+TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config /tmp/network_latency_spike.yaml --log-output stdout --rand-seed 12345
+```
+
+6) Redis/KeyDB memory bloat
+```yaml
+- name: "redis_memory_bloat"
+  start: "20s"
+  duration: "90s"
+  labels:
+    OrgId: ["bank_03"]
+  effects:
+    - metric: "redis_memory"
+      op: "scale"
+      value: 2.0
+    - metric: "redis_evicted_keys_total"
+      op: "add"
+      value: 20
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/redis_memory_bloat.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "redis_memory_bloat"
+      start: "0s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_03"]
+      effects:
+        - metric: "redis_memory"
+          op: "scale"
+          value: 2.0
+        - metric: "redis_evicted_keys_total"
+          op: "add"
+          value: 20
+YAML
+
+TRANSACTION_RATE=40 ./bin/otel-fintrans-simulator --config /tmp/redis_memory_bloat.yaml --log-output stdout --rand-seed 12345
+```
+
+7) Tomcat thread ramp & queue growth (load generation)
+```yaml
+- name: "tomcat_thread_ramp"
+  start: "15s"
+  duration: "2m"
+  labels:
+    OrgId: ["bank_02", "bank_04"]
+  effects:
+    - metric: "tomcat_threads"
+      op: "ramp"
+      step: 2
+    - metric: "tomcat_threads_queue_seconds"
+      op: "add"
+      value: 5
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/tomcat_thread_ramp.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "tomcat_thread_ramp"
+      start: "0s"
+      duration: "2m"
+      labels:
+        OrgId: ["bank_02", "bank_04"]
+      effects:
+        - metric: "tomcat_threads"
+          op: "ramp"
+          step: 2
+        - metric: "tomcat_threads_queue_seconds"
+          op: "add"
+          value: 5
+YAML
+
+TRANSACTION_RATE=100 ./bin/otel-fintrans-simulator --config /tmp/tomcat_thread_ramp.yaml --log-output stdout --rand-seed 12345
+```
+
+8) Kafka under-replicated partitions burst (controller-level instability)
+```yaml
+- name: "kafka_underreplicated_burst"
+  start: "30s"
+  duration: "1m"
+  labels:
+    OrgId: ["bank_01", "bank_03"]
+  effects:
+    - metric: "kafka_controller_UnderReplicatedPartitions"
+      op: "add"
+      value: 5
+    - metric: "transaction_failures"
+      op: "scale"
+      value: 6.0
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/kafka_underreplicated_burst.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "kafka_underreplicated_burst"
+      start: "0s"
+      duration: "60s"
+      labels:
+        OrgId: ["bank_01", "bank_03"]
+      effects:
+        - metric: "kafka_controller_UnderReplicatedPartitions"
+          op: "add"
+          value: 5
+        - metric: "transaction_failures"
+          op: "scale"
+          value: 6.0
+YAML
+
+TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config /tmp/kafka_underreplicated_burst.yaml --log-output stdout --rand-seed 12345
+```
+
+9) Composite / partial outage (multi-system cascade)
+```yaml
+- name: "partial_outage_bank03"
+  start: "60s"
+  duration: "2m"
+  labels:
+    OrgId: ["bank_03"]
+  effects:
+    - metric: "kafka_controller_UnderReplicatedPartitions"
+      op: "add"
+      value: 3
+    - metric: "db_latency"
+      op: "scale"
+      value: 6.0
+    - metric: "transaction_failures"
+      op: "scale"
+      value: 8.0
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/partial_outage_bank03.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "partial_outage_bank03"
+      start: "0s"
+      duration: "2m"
+      labels:
+        OrgId: ["bank_03"]
+      effects:
+        - metric: "kafka_controller_UnderReplicatedPartitions"
+          op: "add"
+          value: 3
+        - metric: "db_latency"
+          op: "scale"
+          value: 6.0
+        - metric: "transaction_failures"
+          op: "scale"
+          value: 8.0
+YAML
+
+TRANSACTION_RATE=60 ./bin/otel-fintrans-simulator --config /tmp/partial_outage_bank03.yaml --log-output stdout --rand-seed 12345
+```
+
+10) Mixed signals (contradictory telemetry)
+```yaml
+- name: "kafka_mixed_signals"
+  start: "0s"
+  duration: "90s"
+  labels:
+    OrgId: ["bank_01"]
+  effects:
+    - metric: "kafka_disk_failure"
+      op: "scale"
+      value: 4.0
+    - metric: "kafka_throughput"
+      op: "scale"
+      value: 0.2
+
+# This produces more kafka errors and URP while reducing requests/throughput — a mixed signal pattern
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/kafka_mixed_signals.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "kafka_mixed_signals"
+      start: "0s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_01"]
+      effects:
+        - metric: "kafka_disk_failure"
+          op: "scale"
+          value: 4.0
+        - metric: "kafka_throughput"
+          op: "scale"
+          value: 0.2
+YAML
+
+TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config /tmp/kafka_mixed_signals.yaml --log-output stdout --rand-seed 12345
+```
+
+Tips & mapping notes
+- Metric names are flexible — the scheduler accepts the common names listed above and applies them to the simulator runtime state. If your telemetry backend expects custom names, update `telemetry.metric_names` in `simulator-config.yaml`.
+- Use `labels` to scope scenarios to specific OrgIds, OrgNames, or transaction types — this helps exercise RCA/correlation engines against targeted faults.
+- `scale` and `add` are useful for magnitude changes; `ramp` is useful for gradual increases over the scenario duration.
+
+Now that you have concrete scenarios, your RCA and correlation engines can detect and classify whether failures originate in service deployments, infra (e.g., disks/memory), or network layers. Use the deterministic seed (`failure.seed`) to make demo runs reproducible for tests and demos.
+
+Examples directory
+------------------
+I've added ready-to-run scenario configuration files under `examples/scenarios/`. Use `examples/run_scenario.sh <name>` to run a scenario quickly — the script will build the binary if necessary and run the simulator with sensible defaults.
+
+Example:
+
+```bash
+# run the kafka_disk_issue scenario (from examples/scenarios/kafka_disk_issue.yaml)
+examples/run_scenario.sh kafka_disk_issue
+```
+
+Available example scenario configs (full configs)
+----------------------------------
+Below are the example scenario files included in `examples/scenarios/`. Each file is a full, standalone simulator YAML (contains `telemetry`, `metric_names`, `labels` and the `failure` section), ready to run as-is.
+
+- `db_slow_cascade.yaml` — database slowdown / deployment outage (increased db latency, more transaction failures)
+- `kafka_disk_issue.yaml` — hardware disk/storage failure affecting Kafka (more produce/consume errors, higher URP)
+- `keydb_memory_corruption.yaml` — bad memory for KeyDB / valkey (higher KeyDB failures and Redis noise)
+- `network_packet_loss.yaml` — network packet drops (increased packet drops and noisy messaging errors)
+- `network_latency_spike.yaml` — network latency spike (higher network latency across nodes, impacts consumer/producer latencies)
+- `redis_memory_bloat.yaml` — Redis/KeyDB memory bloat and evictions
+- `tomcat_thread_ramp.yaml` — Tomcat thread busy ramp and queue increases (load stress)
+- `kafka_underreplicated_burst.yaml` — Kafka under-replication burst (controller instability)
+- `kafka_mixed_signals.yaml` — mixed signal: more Kafka errors with reduced throughput (contradictory telemetry)
+- `partial_outage_bank03.yaml` — composite partial outage targeting bank_03 (multi-system cascade)
+
+Run any of them with the helper script, for example:
+
+```bash
+examples/run_scenario.sh kafka_mixed_signals
+```
+
+Or run directly using the binary and config path:
+
+```bash
+TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config examples/scenarios/kafka_mixed_signals.yaml --log-output stdout
+```
+
 ## Integration with Mirador Core
 
 ### Testing Correlation Engine

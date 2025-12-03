@@ -165,4 +165,53 @@ failure:
           op: "scale"
           value: 8.0
 
+    - name: "kafka_disk_issue"
+      start: "75s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_01"]
+      effects:
+        - metric: "kafka_disk_failure"
+          op: "scale"
+          value: 4.0
+        - metric: "kafka_controller_UnderReplicatedPartitions"
+          op: "add"
+          value: 10
+
+    - name: "keydb_memory_corruption"
+      start: "90s"
+      duration: "2m"
+      labels:
+        OrgId: ["bank_02"]
+      effects:
+        - metric: "keydb_memory_fault"
+          op: "scale"
+          value: 5.0
+        - metric: "redis_memory"
+          op: "scale"
+          value: 2.5
+
+    - name: "network_packet_loss"
+      start: "30s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_03"]
+      effects:
+        - metric: "network_packet_drop"
+          op: "scale"
+          value: 6.0
+        - metric: "node_network_packet_drops_total"
+          op: "add"
+          value: 10
+
+    - name: "network_latency_spike"
+      start: "45s"
+      duration: "1m30s"
+      labels:
+        OrgId: ["bank_02"]
+      effects:
+        - metric: "network_latency"
+          op: "scale"
+          value: 5.0
+
 # End fully-loaded config

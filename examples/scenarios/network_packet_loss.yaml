@@ -1,0 +1,28 @@
+# Full example config: Network packet loss scenario
+telemetry:
+  metric_names:
+    node_network_packet_drops_total: "node_network_packet_drops_total"
+
+  labels:
+    org_ids: ["bank_01", "bank_02", "bank_03"]
+
+  outputs: ["otlp"]
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+
+failure:
+  mode: "bursty"
+  rate: 0.01
+  scenarios:
+    - name: "network_packet_loss"
+      start: "0s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_03"]
+      effects:
+        - metric: "network_packet_drop"
+          op: "scale"
+          value: 6.0
+        - metric: "node_network_packet_drops_total"
+          op: "add"
+          value: 10

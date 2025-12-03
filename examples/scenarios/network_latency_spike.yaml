@@ -1,0 +1,25 @@
+# Full example config: Network latency spike scenario
+telemetry:
+  metric_names:
+    node_network_latency_ms: "node_network_latency_ms"
+
+  labels:
+    org_ids: ["bank_01", "bank_02"]
+
+  outputs: ["otlp"]
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+
+failure:
+  mode: "bursty"
+  rate: 0.01
+  scenarios:
+    - name: "network_latency_spike"
+      start: "0s"
+      duration: "90s"
+      labels:
+        OrgId: ["bank_02"]
+      effects:
+        - metric: "network_latency"
+          op: "scale"
+          value: 5.0

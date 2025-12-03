@@ -1,0 +1,32 @@
+# Full example config: KeyDB / valkey memory fault — triggers keydb failures and redis noise
+telemetry:
+  service_names:
+    keydb_client: "keydb-client"
+
+  metric_names:
+    redis_memory_used_bytes: "redis_memory_used_bytes"
+    redis_evicted_keys_total: "redis_evicted_keys_total"
+
+  labels:
+    org_ids: ["bank_01", "bank_02", "bank_03"]
+
+  outputs: ["otlp"]
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+
+failure:
+  mode: "bursty"
+  rate: 0.02
+  scenarios:
+    - name: "keydb_memory_corruption"
+      start: "0s"
+      duration: "120s"
+      labels:
+        OrgId: ["bank_02"]
+      effects:
+        - metric: "keydb_memory_fault"
+          op: "scale"
+          value: 5.0
+        - metric: "redis_memory"
+          op: "scale"
+          value: 2.5

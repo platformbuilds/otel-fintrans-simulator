@@ -129,36 +129,39 @@ type Simulator struct {
 	kafkaISRChanges      metric.Float64Counter
 
 	// Node exporter / infra
-	nodeLoad1             metric.Float64UpDownCounter
-	nodeMemoryAvailable   metric.Float64UpDownCounter
-	nodeMemoryTotal       metric.Float64UpDownCounter
-	nodeFilesystemAvail   metric.Float64UpDownCounter
-	nodeFilesystemSize    metric.Float64UpDownCounter
-	nodeDiskIOTimeSeconds metric.Float64Counter
-	nodeContextSwitches   metric.Float64Counter
+	nodeLoad1              metric.Float64UpDownCounter
+	nodeMemoryAvailable    metric.Float64UpDownCounter
+	nodeMemoryTotal        metric.Float64UpDownCounter
+	nodeFilesystemAvail    metric.Float64UpDownCounter
+	nodeFilesystemSize     metric.Float64UpDownCounter
+	nodeDiskIOTimeSeconds  metric.Float64Counter
+	nodeNetworkLatencyMs   metric.Float64UpDownCounter
+	nodeNetworkPacketDrops metric.Int64Counter
+	nodeContextSwitches    metric.Float64Counter
 
 	// internal state for gauge-like values (kept so we can use UpDown counters)
-	stateLock          sync.Mutex
-	stateJvmUsed       float64
-	stateJvmMax        float64
-	stateTomcatBusy    int64
-	stateTomcatMax     int64
-	stateTomcatQueue   float64
-	stateCPU           float64
-	stateProcessUptime float64
-	stateFilesOpen     int64
-	stateFilesMax      int64
-	stateHikariActive  int64
-	stateHikariMax     int64
-	stateRedisUsed     float64
-	stateRedisMax      float64
-	stateRedisClients  int64
-	stateKafkaURP      int64
-	stateNodeLoad1     float64
-	stateNodeMemAvail  float64
-	stateNodeMemTotal  float64
-	stateFsAvail       float64
-	stateFsSize        float64
+	stateLock               sync.Mutex
+	stateJvmUsed            float64
+	stateJvmMax             float64
+	stateTomcatBusy         int64
+	stateTomcatMax          int64
+	stateTomcatQueue        float64
+	stateCPU                float64
+	stateProcessUptime      float64
+	stateFilesOpen          int64
+	stateFilesMax           int64
+	stateHikariActive       int64
+	stateHikariMax          int64
+	stateRedisUsed          float64
+	stateRedisMax           float64
+	stateRedisClients       int64
+	stateKafkaURP           int64
+	stateNodeLoad1          float64
+	stateNodeMemAvail       float64
+	stateNodeMemTotal       float64
+	stateFsAvail            float64
+	stateFsSize             float64
+	stateNodeNetworkLatency float64
 
 	// scenario scheduler
 	scenarioSched *scenarioScheduler
@@ -170,6 +173,15 @@ type Simulator struct {
 	stateTomcatLoadMult  float64
 	stateRedisMemoryMult float64
 	stateKafkaURPMult    float64
+	// additional multiplier to simulate reduced or increased kafka throughput independent of errors
+	stateKafkaReqsMult float64
+	// per-subsystem scenario multipliers used to simulate infra/hardware faults
+	// e.g. disk failures causing kafka errors, memory faults causing KeyDB failures
+	stateKafkaErrorMult float64
+	stateKeydbFailMult  float64
+	// network-related scenario multipliers
+	stateNetworkLatencyMult float64
+	stateNetworkDropMult    float64
 	// runtime configuration
 	telemCfg     TelemetryConfig
 	failureSched *failureScheduler
@@ -1167,6 +1179,27 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 	}
 	s.nodeDiskIOTimeSeconds, err = s.meter.Float64Counter(nodeDiskIOName,
 		metric.WithDescription("Node disk io time seconds (cumulative)"))
+
+	// Node network metrics
+	nodeNetLatencyName := "node_network_latency_ms"
+	if n, ok := s.telemCfg.MetricNames.Additional[nodeNetLatencyName]; ok && n != "" {
+		nodeNetLatencyName = n
+	}
+	s.nodeNetworkLatencyMs, err = s.meter.Float64UpDownCounter(nodeNetLatencyName,
+		metric.WithDescription("Node network latency in milliseconds (gauge-like)"))
+	if err != nil {
+		return err
+	}
+
+	nodePacketDropsName := "node_network_packet_drops_total"
+	if n, ok := s.telemCfg.MetricNames.Additional[nodePacketDropsName]; ok && n != "" {
+		nodePacketDropsName = n
+	}
+	s.nodeNetworkPacketDrops, err = s.meter.Int64Counter(nodePacketDropsName,
+		metric.WithDescription("Node network packet drops (incremental)"))
+	if err != nil {
+		return err
+	}
 	if err != nil {
 		return err
 	}
@@ -1261,6 +1294,9 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 	if s.stateFsAvail == 0 {
 		s.stateFsAvail = s.stateFsSize * 0.7
 	}
+	if s.stateNodeNetworkLatency == 0 {
+		s.stateNodeNetworkLatency = 3.0 // ms baseline
+	}
 	s.stateLock.Unlock()
 
 	// initialize multipliers
@@ -1270,6 +1306,12 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 	s.stateTomcatLoadMult = 1.0
 	s.stateRedisMemoryMult = 1.0
 	s.stateKafkaURPMult = 1.0
+	s.stateKafkaErrorMult = 1.0
+	s.stateKeydbFailMult = 1.0
+	s.stateNetworkLatencyMult = 1.0
+	s.stateNetworkDropMult = 1.0
+	// kafka throughput/requests multiplier (1.0 = normal, <1.0 reduced throughput)
+	s.stateKafkaReqsMult = 1.0
 
 	// background ticker
 	ticker := time.NewTicker(interval)
@@ -1359,6 +1401,61 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 									s.stateKafkaURPMult = eff.Value
 								case "ramp":
 									s.stateKafkaURPMult += eff.Step
+								}
+							case "kafka_error", "kafka_errors", "kafka_disk", "kafka_disk_failure", "kafka_disk_io":
+								switch eff.Op {
+								case "scale":
+									s.stateKafkaErrorMult *= eff.Value
+								case "add":
+									s.stateKafkaErrorMult += eff.Value
+								case "set":
+									s.stateKafkaErrorMult = eff.Value
+								case "ramp":
+									s.stateKafkaErrorMult += eff.Step
+								}
+							case "kafka_requests", "kafka_throughput", "kafka_requests_per_sec":
+								switch eff.Op {
+								case "scale":
+									s.stateKafkaReqsMult *= eff.Value
+								case "add":
+									s.stateKafkaReqsMult += eff.Value
+								case "set":
+									s.stateKafkaReqsMult = eff.Value
+								case "ramp":
+									s.stateKafkaReqsMult += eff.Step
+								}
+							case "keydb_memory_fault", "keydb_bad_memory", "valkey_bad_memory", "keydb_failure", "node_memory_corruption":
+								switch eff.Op {
+								case "scale":
+									s.stateKeydbFailMult *= eff.Value
+								case "add":
+									s.stateKeydbFailMult += eff.Value
+								case "set":
+									s.stateKeydbFailMult = eff.Value
+								case "ramp":
+									s.stateKeydbFailMult += eff.Step
+								}
+							case "network_latency", "node_network_latency_ms", "network_latency_ms":
+								switch eff.Op {
+								case "scale":
+									s.stateNetworkLatencyMult *= eff.Value
+								case "add":
+									s.stateNetworkLatencyMult += eff.Value
+								case "set":
+									s.stateNetworkLatencyMult = eff.Value
+								case "ramp":
+									s.stateNetworkLatencyMult += eff.Step
+								}
+							case "network_packet_drop", "node_network_packet_drops_total", "network_packet_drops", "packet_drop":
+								switch eff.Op {
+								case "scale":
+									s.stateNetworkDropMult *= eff.Value
+								case "add":
+									s.stateNetworkDropMult += eff.Value
+								case "set":
+									s.stateNetworkDropMult = eff.Value
+								case "ramp":
+									s.stateNetworkDropMult += eff.Step
 								}
 							default:
 								// unknown metric - ignore; we may wish to extend later
@@ -1492,11 +1589,47 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 				{
 					s.nodeDiskIOTimeSeconds.Add(ctx, s.rng.Float64()*0.1)
 					s.nodeContextSwitches.Add(ctx, s.rng.Float64()*10)
+
+					// small random walk for network latency (ms) scaled by scenario multiplier
+					netDelta := (s.rng.Float64() - 0.5) * 2.0 * s.stateNetworkLatencyMult
+					nextNet := s.stateNodeNetworkLatency + netDelta
+					if nextNet < 0.2 {
+						nextNet = 0.2
+					}
+					if nextNet > 2000 {
+						nextNet = 2000
+					}
+					if nextNet != s.stateNodeNetworkLatency {
+						s.nodeNetworkLatencyMs.Add(ctx, nextNet-s.stateNodeNetworkLatency)
+					}
+					s.stateNodeNetworkLatency = nextNet
+
+					// packet drops: when scenario multiplier > 1, emit extra packet drops
+					if s.stateNetworkDropMult > 1.0 {
+						addDrops := int64(s.rng.Intn(1 + int(s.stateNetworkDropMult)))
+						if addDrops > 0 {
+							s.nodeNetworkPacketDrops.Add(ctx, addDrops)
+							// also surface higher-level errors in messaging layers
+							s.kafkaRequestErrors.Add(ctx, addDrops)
+						}
+					}
 				}
 
 				// Kafka request rate & bytes-in/second counters (incremental)
-				s.kafkaRequestsPerSec.Add(ctx, 50+s.rng.Float64()*200)
+				// apply kafka requests multiplier to simulate throughput changes (mixed signals)
+				reqVal := (50 + s.rng.Float64()*200) * s.stateKafkaReqsMult
+				s.kafkaRequestsPerSec.Add(ctx, reqVal)
 				s.kafkaBytesInPerSec.Add(ctx, 1024+s.rng.Float64()*10*1024)
+				// when scenario indicates disk problems for kafka, emit additional request errors and ISR noise
+				if s.stateKafkaErrorMult > 1.0 {
+					// add variable number of request errors scaled by multiplier
+					addErrs := int64(1 + s.rng.Int63n(int64(1+int64(s.stateKafkaErrorMult))))
+					s.kafkaRequestErrors.Add(ctx, addErrs)
+					// occasionally emit ISR changes (broker rebalances etc.)
+					if s.rng.Float64() < 0.3*s.stateKafkaErrorMult {
+						s.kafkaISRChanges.Add(ctx, s.rng.Float64()*s.stateKafkaErrorMult)
+					}
+				}
 			}
 		}
 	}()
@@ -1953,13 +2086,27 @@ func (s *Simulator) simulateKeyDBOp(ctx context.Context, transactionID, operatio
 
 	start := time.Now()
 
-	if shouldFail {
+	// consider scenario-driven KeyDB failures (e.g., bad memory modules / corrupted memory)
+	combinedFail := shouldFail
+	if s.stateKeydbFailMult > 1.0 && s.rng.Float64() < ((s.stateKeydbFailMult-1.0)*0.25) {
+		combinedFail = true
+	}
+
+	if combinedFail {
 		span.SetStatus(codes.Error, "KeyDB operation failed")
+		// make log reason more descriptive when scenario multiplier drove it
+		reason := "keydb_connection_error"
+		if s.stateKeydbFailMult > 1.0 {
+			reason = "keydb_memory_corruption"
+			// also emit some redis/keydb related noise so metrics reflect memory fault
+			s.redisKeyspaceMisses.Add(ctx, 1)
+			s.redisEvictedKeys.Add(ctx, 1)
+		}
 		s.logger.Error("KeyDB operation failed",
 			zap.String("transaction_id", transactionID),
 			zap.String("service_name", keyName),
 			zap.String("severity", "ERROR"),
-			zap.String("failure_reason", "keydb_connection_error"),
+			zap.String("failure_reason", reason),
 		)
 		return fmt.Errorf("keydb operation failed")
 	}
@@ -1997,8 +2144,29 @@ func (s *Simulator) simulateKafkaProduce(ctx context.Context, transactionID stri
 
 	start := time.Now()
 
-	if shouldFail {
+	// consider scenario-driven Kafka errors (e.g., disk failure causing produce errors)
+	combinedFail := shouldFail
+	if s.stateKafkaErrorMult > 1.0 && s.rng.Float64() < ((s.stateKafkaErrorMult-1.0)*0.25) {
+		combinedFail = true
+	}
+
+	// consider network issues: increased latency and packet drops
+	// apply latency multiplier to produce latency
+	if s.stateNetworkLatencyMult > 1.0 {
+		// scale the local latency simulated for produce
+		// if sleep uses stateDbLatencyMult elsewhere we'll multiply the produce wait
+		// add a small network-induced delay
+		extra := float64(5+s.rng.Intn(20)) * s.stateNetworkLatencyMult
+		time.Sleep(time.Duration(extra) * time.Millisecond)
+	}
+	if s.stateNetworkDropMult > 1.0 && s.rng.Float64() < (0.01*s.stateNetworkDropMult) {
+		combinedFail = true
+	}
+
+	if combinedFail {
 		span.SetStatus(codes.Error, "Kafka produce failed")
+		// increment error counter when scenario is causing errors
+		s.kafkaRequestErrors.Add(ctx, 1)
 		return fmt.Errorf("kafka produce failed")
 	}
 
@@ -2042,13 +2210,36 @@ func (s *Simulator) simulateKafkaConsumer(ctx context.Context, transactionID str
 
 	start := time.Now()
 
-	if shouldFail {
+	// consider scenario-driven Kafka consume errors and network issues
+	combinedFail := shouldFail
+	if s.stateKafkaErrorMult > 1.0 && s.rng.Float64() < ((s.stateKafkaErrorMult-1.0)*0.25) {
+		combinedFail = true
+	}
+
+	// network-induced latency
+	if s.stateNetworkLatencyMult > 1.0 {
+		extra := float64(10+s.rng.Intn(50)) * s.stateNetworkLatencyMult
+		time.Sleep(time.Duration(extra) * time.Millisecond)
+	}
+
+	// packet drops may cause consume to fail or be noisy
+	if s.stateNetworkDropMult > 1.0 && s.rng.Float64() < (0.02*s.stateNetworkDropMult) {
+		combinedFail = true
+	}
+
+	if combinedFail {
 		span.SetStatus(codes.Error, "Kafka consume failed")
+		s.kafkaRequestErrors.Add(ctx, 1)
 		return
 	}
 
 	// Simulate processing delay
-	time.Sleep(time.Duration(50+s.rng.Intn(100)) * time.Millisecond)
+	baseDelayMs := float64(50 + s.rng.Intn(100))
+	// add network-induced latency when present
+	if s.stateNetworkLatencyMult > 1.0 {
+		baseDelayMs = baseDelayMs * s.stateNetworkLatencyMult
+	}
+	time.Sleep(time.Duration(baseDelayMs) * time.Millisecond)
 
 	// Write final state to Cassandra
 	if err := s.simulateCassandraOp(ctx, transactionID, "final_state_write", false); err != nil {
@@ -2092,7 +2283,12 @@ func (s *Simulator) simulateAPIGatewayKafkaConsumer(ctx context.Context, transac
 
 	start := time.Now()
 
-	if shouldFail {
+	// also consider failures due to packet drop multiplier
+	consumerFail := shouldFail
+	if s.stateNetworkDropMult > 1.0 && s.rng.Float64() < (0.02*s.stateNetworkDropMult) {
+		consumerFail = true
+	}
+	if consumerFail {
 		consumerSpan.SetStatus(codes.Error, "Kafka consume failed")
 		return
 	}

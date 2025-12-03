@@ -1,0 +1,40 @@
+# Full example config: DB slowdown / deployment outage
+telemetry:
+  service_names:
+    api_gateway: "api-gateway"
+    tps: "tps"
+    cassandra_client: "cassandra-client"
+    keydb_client: "keydb-client"
+    kafka_producer: "kafka-producer"
+    kafka_consumer: "kafka-consumer"
+
+  metric_names:
+    transactions_total: "transactions_total"
+    transactions_failed_total: "transactions_failed_total"
+    transaction_latency_seconds: "transaction_latency_seconds"
+    db_ops_total: "db_ops_total"
+    db_latency_seconds: "db_latency_seconds"
+
+  labels:
+    org_ids: ["bank_01", "bank_02", "bank_03"]
+
+  outputs: ["otlp"]
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+
+failure:
+  mode: "bursty"
+  rate: 0.01
+  scenarios:
+    - name: "db_slow_cascade"
+      start: "0s"
+      duration: "60s"
+      labels:
+        OrgId: ["bank_01", "bank_02"]
+      effects:
+        - metric: "db_latency"
+          op: "scale"
+          value: 5.0
+        - metric: "transaction_failures"
+          op: "scale"
+          value: 4.0
