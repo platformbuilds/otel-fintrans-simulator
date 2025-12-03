@@ -1190,6 +1190,10 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 // values and counters independent of per-transaction events. It listens to the
 // provided ctx and returns immediately if ctx is already cancelled.
 func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
+	// Ensure RNG exists for background mutation/metrics
+	if s.rng == nil {
+		s.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
 	// default interval if unset
 	interval := s.dataInterval
 	if interval <= 0 {
@@ -1621,6 +1625,10 @@ func (s *Simulator) runSimulation(ctx context.Context) {
 }
 
 func (s *Simulator) simulateTransaction(ctx context.Context, transactionID string) {
+	// Ensure RNG is initialized when tests or callers create a zero-value Simulator
+	if s.rng == nil {
+		s.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
 	start := time.Now()
 
 	// Generate transaction details
@@ -1769,6 +1777,9 @@ func (s *Simulator) simulateTransaction(ctx context.Context, transactionID strin
 }
 
 func (s *Simulator) simulateTPS(ctx context.Context, transactionID string, amountPaise int64, customerID string, failureComponent string, shouldFail bool) TransactionResult {
+	if s.rng == nil {
+		s.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
 	tpsName := "tps"
 	if s.telemCfg.ServiceNames.TPS != "" {
 		tpsName = s.telemCfg.ServiceNames.TPS
@@ -1879,6 +1890,9 @@ func (s *Simulator) simulateTPS(ctx context.Context, transactionID string, amoun
 }
 
 func (s *Simulator) simulateCassandraOp(ctx context.Context, transactionID, operation string, shouldFail bool) error {
+	if s.rng == nil {
+		s.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
 	cassName := "cassandra-client"
 	if s.telemCfg.ServiceNames.CassandraClient != "" {
 		cassName = s.telemCfg.ServiceNames.CassandraClient
@@ -1919,6 +1933,9 @@ func (s *Simulator) simulateCassandraOp(ctx context.Context, transactionID, oper
 }
 
 func (s *Simulator) simulateKeyDBOp(ctx context.Context, transactionID, operation string, shouldFail bool) error {
+	if s.rng == nil {
+		s.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
 	keyName := "keydb-client"
 	if s.telemCfg.ServiceNames.KeyDBClient != "" {
 		keyName = s.telemCfg.ServiceNames.KeyDBClient
@@ -1959,6 +1976,9 @@ func (s *Simulator) simulateKeyDBOp(ctx context.Context, transactionID, operatio
 }
 
 func (s *Simulator) simulateKafkaProduce(ctx context.Context, transactionID string, amountPaise int64, shouldFail bool) error {
+	if s.rng == nil {
+		s.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
 	kpName := "kafka-producer"
 	if s.telemCfg.ServiceNames.KafkaProducer != "" {
 		kpName = s.telemCfg.ServiceNames.KafkaProducer
@@ -2001,6 +2021,9 @@ func (s *Simulator) simulateKafkaProduce(ctx context.Context, transactionID stri
 }
 
 func (s *Simulator) simulateKafkaConsumer(ctx context.Context, transactionID string, amountPaise int64, shouldFail bool) {
+	if s.rng == nil {
+		s.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
 	kcName := "kafka-consumer"
 	if s.telemCfg.ServiceNames.KafkaConsumer != "" {
 		kcName = s.telemCfg.ServiceNames.KafkaConsumer
@@ -2047,6 +2070,9 @@ func (s *Simulator) simulateKafkaConsumer(ctx context.Context, transactionID str
 }
 
 func (s *Simulator) simulateAPIGatewayKafkaConsumer(ctx context.Context, transactionID string, amountPaise int64, shouldFail bool) {
+	if s.rng == nil {
+		s.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
 	// API Gateway consumes from Kafka
 	agName := "api-gateway"
 	if s.telemCfg.ServiceNames.APIGateway != "" {
@@ -2094,6 +2120,9 @@ func (s *Simulator) simulateAPIGatewayKafkaConsumer(ctx context.Context, transac
 }
 
 func (s *Simulator) simulateAPIGatewayCassandraWrite(ctx context.Context, transactionID, operation string, shouldFail bool) error {
+	if s.rng == nil {
+		s.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
 	agName := "api-gateway"
 	if s.telemCfg.ServiceNames.APIGateway != "" {
 		agName = s.telemCfg.ServiceNames.APIGateway
