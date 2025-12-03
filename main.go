@@ -74,21 +74,108 @@ type Simulator struct {
 	dataInterval       time.Duration // Time between data points
 	startTimeOffset    time.Duration // How far back to start (e.g., -15m means 15 minutes ago)
 
+	rng *rand.Rand
+
 	// Metric instruments
-	transactionsTotal       metric.Int64Counter
-	transactionsFailedTotal metric.Int64Counter
-	dbOpsTotal              metric.Int64Counter
-	kafkaProduceTotal       metric.Int64Counter
-	kafkaConsumeTotal       metric.Int64Counter
-	transactionLatency      metric.Float64Histogram
-	dbLatency               metric.Float64Histogram
-	transactionAmountSum    metric.Int64Counter
-	transactionAmountCount  metric.Int64Counter
-	kafkaProduceLatency     metric.Float64Histogram
-	kafkaConsumeLatency     metric.Float64Histogram
+	transactionsTotal        metric.Int64Counter
+	transactionsFailedTotal  metric.Int64Counter
+	dbOpsTotal               metric.Int64Counter
+	kafkaProduceTotal        metric.Int64Counter
+	kafkaConsumeTotal        metric.Int64Counter
+	transactionLatency       metric.Float64Histogram
+	transactionLatencyBucket metric.Float64Counter
+	transactionLatencySum    metric.Float64Counter
+	transactionLatencyCount  metric.Int64Counter
+	dbLatency                metric.Float64Histogram
+	dbLatencyBucket          metric.Float64Counter
+	dbLatencySum             metric.Float64Counter
+	dbLatencyCount           metric.Int64Counter
+	transactionAmountSum     metric.Int64Counter
+	transactionAmountCount   metric.Int64Counter
+	kafkaProduceLatency      metric.Float64Histogram
+	kafkaConsumeLatency      metric.Float64Histogram
+
+	// Additional instruments for KPI coverage
+	jvmMemoryUsed          metric.Float64UpDownCounter
+	jvmMemoryMax           metric.Float64UpDownCounter
+	jvmGCPauseSecondsSum   metric.Float64Counter
+	jvmGCPauseSecondsCount metric.Int64Counter
+
+	tomcatThreadsBusy     metric.Int64UpDownCounter
+	tomcatThreadsMax      metric.Int64UpDownCounter
+	tomcatThreadsQueueSec metric.Float64UpDownCounter
+
+	processCPUUsage      metric.Float64UpDownCounter
+	processUptimeSeconds metric.Float64UpDownCounter
+	processFilesOpen     metric.Int64UpDownCounter
+	processFilesMax      metric.Int64UpDownCounter
+
+	hikariConnectionsActive metric.Int64UpDownCounter
+	hikariConnectionsMax    metric.Int64UpDownCounter
+
+	// Redis / KeyDB
+	redisMemoryUsed       metric.Float64UpDownCounter
+	redisMemoryMax        metric.Float64UpDownCounter
+	redisKeyspaceHits     metric.Int64Counter
+	redisKeyspaceMisses   metric.Int64Counter
+	redisEvictedKeys      metric.Int64Counter
+	redisConnectedClients metric.Int64UpDownCounter
+
+	// Kafka JMX-like metrics
+	kafkaUnderReplicated metric.Int64UpDownCounter
+	kafkaRequestsPerSec  metric.Float64Counter
+	kafkaBytesInPerSec   metric.Float64Counter
+	kafkaRequestErrors   metric.Int64Counter
+	kafkaISRChanges      metric.Float64Counter
+
+	// Node exporter / infra
+	nodeLoad1             metric.Float64UpDownCounter
+	nodeMemoryAvailable   metric.Float64UpDownCounter
+	nodeMemoryTotal       metric.Float64UpDownCounter
+	nodeFilesystemAvail   metric.Float64UpDownCounter
+	nodeFilesystemSize    metric.Float64UpDownCounter
+	nodeDiskIOTimeSeconds metric.Float64Counter
+	nodeContextSwitches   metric.Float64Counter
+
+	// internal state for gauge-like values (kept so we can use UpDown counters)
+	stateLock          sync.Mutex
+	stateJvmUsed       float64
+	stateJvmMax        float64
+	stateTomcatBusy    int64
+	stateTomcatMax     int64
+	stateTomcatQueue   float64
+	stateCPU           float64
+	stateProcessUptime float64
+	stateFilesOpen     int64
+	stateFilesMax      int64
+	stateHikariActive  int64
+	stateHikariMax     int64
+	stateRedisUsed     float64
+	stateRedisMax      float64
+	stateRedisClients  int64
+	stateKafkaURP      int64
+	stateNodeLoad1     float64
+	stateNodeMemAvail  float64
+	stateNodeMemTotal  float64
+	stateFsAvail       float64
+	stateFsSize        float64
+
+	// scenario scheduler
+	scenarioSched *scenarioScheduler
+
+	// per-target multipliers/state applied by active scenarios
+	stateDbLatencyMult   float64
+	stateGCPauseMult     float64
+	stateFailureMult     float64
+	stateTomcatLoadMult  float64
+	stateRedisMemoryMult float64
+	stateKafkaURPMult    float64
 	// runtime configuration
 	telemCfg     TelemetryConfig
 	failureSched *failureScheduler
+	// histogram bucket boundaries (predefined)
+	transactionLatencyBuckets []float64
+	dbLatencyBuckets          []float64
 }
 
 type TransactionResult struct {
@@ -111,7 +198,7 @@ func main() {
 		timeWindowStr      = flag.String("time-window", "0s", "Time window to spread data over (e.g., 15m, 1h, 0s=instant)")
 		dataIntervalStr    = flag.String("data-interval", "30s", "Time interval between data points (e.g., 10s, 1m)")
 		startTimeOffsetStr = flag.String("start-time-offset", "0s", "Start time offset from now (e.g., -15m for 15 minutes ago, 0s=now)")
-		configPath         = flag.String("config", "", "Path to optional simulator YAML configuration file")
+		configPath         = flag.String("config", "", "Path to optional simulator YAML configuration file (supports telemetry names, label sets, failure bursts and 'scenarios' for correlated injections)")
 		randSeed           = flag.Int64("rand-seed", 0, "Optional seed for RNG to make runs deterministic")
 		logOutput          = flag.String("log-output", "nop", "Logger output: 'nop' (default) or 'stdout')")
 	)
@@ -197,14 +284,14 @@ func main() {
 		}
 		insecure = cfg.Telemetry.Insecure
 	}
-	// validate telemetry config and log any helpful warnings for inconsistent combos
-	for _, w := range validateTelemetryConfig(endpoint, insecure, cfg.Telemetry.SkipTLSVerify) {
-		log.Printf("Config warning: %s", w)
-	}
-
+	// determine skipVerify early and validate telemetry config and log helpful warnings
 	skipVerify := false
 	if cfg != nil {
 		skipVerify = cfg.Telemetry.SkipTLSVerify
+	}
+	// validate telemetry config and log any helpful warnings for inconsistent combos
+	for _, w := range validateTelemetryConfig(endpoint, insecure, skipVerify) {
+		log.Printf("Config warning: %s", w)
 	}
 
 	shutdown, err := initOTel(ctx, endpoint, insecure, skipVerify, telemetryOutputs)
@@ -217,10 +304,8 @@ func main() {
 		}
 	}()
 
-	// seed RNG if randSeed provided
-	if *randSeed != 0 {
-		rand.Seed(*randSeed)
-	}
+	// Initialize per-simulator RNG. Use config failure seed if present (deterministic),
+	// otherwise use CLI rand-seed if provided, else time-based seed.
 
 	// Create simulator
 	sim := &Simulator{
@@ -238,6 +323,15 @@ func main() {
 		startTimeOffset:    startTimeOffset,
 	}
 
+	// Initialize RNG for simulator
+	if cfg != nil && cfg.Failure.Seed != nil {
+		sim.rng = rand.New(rand.NewSource(*cfg.Failure.Seed))
+	} else if *randSeed != 0 {
+		sim.rng = rand.New(rand.NewSource(*randSeed))
+	} else {
+		sim.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+
 	if cfg != nil {
 		sim.telemCfg = cfg.Telemetry
 
@@ -249,10 +343,16 @@ func main() {
 			}
 			sim.failureSched = fs
 
-			// If a seed is provided, ensure package-level randomness is seeded for deterministic behavior of other RNG use
-			if cfg.Failure.Seed != nil {
-				rand.Seed(*cfg.Failure.Seed)
+			// deterministic behavior for failure scheduler handled inside newFailureScheduler
+		}
+
+		// create scenario scheduler if scenarios defined
+		if len(cfg.Failure.Scenarios) > 0 {
+			ss, err := newScenarioScheduler(cfg.Failure, time.Now().Add(sim.startTimeOffset))
+			if err != nil {
+				log.Fatalf("failed to create scenario scheduler: %v", err)
 			}
+			sim.scenarioSched = ss
 		}
 	}
 
@@ -532,15 +632,15 @@ func validateTelemetryConfig(endpoint string, insecure bool, skipVerify bool) []
 		if hasScheme && u.Scheme == "http" && u.Port() == "4317" {
 			warnings = append(warnings, "endpoint uses http:// on port 4317 — port 4317 is conventionally used for OTLP/gRPC; use 'localhost:4317' (no scheme) for gRPC or use http(s) on port 4318 for OTLP/HTTP")
 		}
-		if hasScheme && u.Scheme == "http" && insecure == false {
+		if hasScheme && u.Scheme == "http" && !insecure {
 			warnings = append(warnings, "endpoint uses http:// scheme but telemetry.insecure=false — http is plaintext; set insecure=true or use https:// for TLS")
 		}
-		if hasScheme && u.Scheme == "https" && insecure == true {
+		if hasScheme && u.Scheme == "https" && insecure {
 			warnings = append(warnings, "endpoint uses https:// but telemetry.insecure=true — insecure=true requests plaintext over TLS endpoint; set insecure=false for TLS or use http:// for plaintext")
 		}
 	} else {
 		// gRPC heuristic
-		if insecure == true && skipVerify == true {
+		if insecure && skipVerify {
 			warnings = append(warnings, "telemetry.skip_tls_verify is ignored when telemetry.insecure=true (plaintext)")
 		}
 	}
@@ -615,6 +715,27 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// transaction histogram counters for PromQL-style buckets
+	txBucketName := txLatencyName + "_bucket"
+	s.transactionLatencyBucket, err = s.meter.Float64Counter(txBucketName,
+		metric.WithDescription("Transaction latency buckets (cumulative)"))
+	if err != nil {
+		return err
+	}
+	txSumName := txLatencyName + "_sum"
+	s.transactionLatencySum, err = s.meter.Float64Counter(txSumName,
+		metric.WithDescription("Transaction latency sum (seconds)"))
+	if err != nil {
+		return err
+	}
+	txCountName := txLatencyName + "_count"
+	s.transactionLatencyCount, err = s.meter.Int64Counter(txCountName,
+		metric.WithDescription("Transaction latency count"))
+	if err != nil {
+		return err
+	}
+	// default buckets
+	s.transactionLatencyBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10}
 
 	dbLatencyName := "db_latency_seconds"
 	if s.telemCfg.MetricNames.DBLatency != "" {
@@ -625,6 +746,27 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// db histogram counters
+	dBucketName := dbLatencyName + "_bucket"
+	s.dbLatencyBucket, err = s.meter.Float64Counter(dBucketName,
+		metric.WithDescription("DB latency buckets (cumulative)"))
+	if err != nil {
+		return err
+	}
+	dSumName := dbLatencyName + "_sum"
+	s.dbLatencySum, err = s.meter.Float64Counter(dSumName,
+		metric.WithDescription("DB latency sum (seconds)"))
+	if err != nil {
+		return err
+	}
+	dCountName := dbLatencyName + "_count"
+	s.dbLatencyCount, err = s.meter.Int64Counter(dCountName,
+		metric.WithDescription("DB latency count"))
+	if err != nil {
+		return err
+	}
+	// default db buckets (similar but fewer)
+	s.dbLatencyBuckets = []float64{0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2}
 
 	txAmountSumName := "transaction_amount_paisa_sum"
 	if s.telemCfg.MetricNames.TransactionAmountSum != "" {
@@ -661,7 +803,699 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 		return err
 	}
 
+	// --- additional instrument initialization ---
+	// JVM
+	jvmUsedName := "jvm_memory_used_bytes"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[jvmUsedName]; ok && n != "" {
+			jvmUsedName = n
+		}
+	}
+	s.jvmMemoryUsed, err = s.meter.Float64UpDownCounter(jvmUsedName,
+		metric.WithDescription("JVM heap memory used in bytes"))
+	if err != nil {
+		return err
+	}
+
+	jvmMaxName := "jvm_memory_max_bytes"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[jvmMaxName]; ok && n != "" {
+			jvmMaxName = n
+		}
+	}
+	s.jvmMemoryMax, err = s.meter.Float64UpDownCounter(jvmMaxName,
+		metric.WithDescription("JVM heap memory max in bytes"))
+	if err != nil {
+		return err
+	}
+
+	jvmGCSumName := "jvm_gc_pause_seconds_sum"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[jvmGCSumName]; ok && n != "" {
+			jvmGCSumName = n
+		}
+	}
+	s.jvmGCPauseSecondsSum, err = s.meter.Float64Counter(jvmGCSumName,
+		metric.WithDescription("Total seconds spent in JVM GC"))
+	if err != nil {
+		return err
+	}
+
+	jvmGCCountName := "jvm_gc_pause_seconds_count"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[jvmGCCountName]; ok && n != "" {
+			jvmGCCountName = n
+		}
+	}
+	s.jvmGCPauseSecondsCount, err = s.meter.Int64Counter(jvmGCCountName,
+		metric.WithDescription("Total number of JVM garbage collections"))
+	if err != nil {
+		return err
+	}
+
+	// Tomcat
+	tomcatBusyName := "tomcat_threads_busy_threads"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[tomcatBusyName]; ok && n != "" {
+			tomcatBusyName = n
+		}
+	}
+	s.tomcatThreadsBusy, err = s.meter.Int64UpDownCounter(tomcatBusyName,
+		metric.WithDescription("Number of busy tomcat threads"))
+	if err != nil {
+		return err
+	}
+
+	tomcatMaxName := "tomcat_threads_config_max_threads"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[tomcatMaxName]; ok && n != "" {
+			tomcatMaxName = n
+		}
+	}
+	s.tomcatThreadsMax, err = s.meter.Int64UpDownCounter(tomcatMaxName,
+		metric.WithDescription("Configured number of tomcat max threads"))
+	if err != nil {
+		return err
+	}
+
+	tomcatQueueName := "tomcat_threads_queue_seconds"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[tomcatQueueName]; ok && n != "" {
+			tomcatQueueName = n
+		}
+	}
+	s.tomcatThreadsQueueSec, err = s.meter.Float64UpDownCounter(tomcatQueueName,
+		metric.WithDescription("Queue seconds spent waiting for Tomcat threads"))
+	if err != nil {
+		return err
+	}
+
+	// Process / runtime
+	cpuName := "process_cpu_usage"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[cpuName]; ok && n != "" {
+			cpuName = n
+		}
+	}
+	s.processCPUUsage, err = s.meter.Float64UpDownCounter(cpuName,
+		metric.WithDescription("CPU usage (percent) for process"))
+	if err != nil {
+		return err
+	}
+
+	uptimeName := "process_uptime_seconds"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[uptimeName]; ok && n != "" {
+			uptimeName = n
+		}
+	}
+	s.processUptimeSeconds, err = s.meter.Float64UpDownCounter(uptimeName,
+		metric.WithDescription("Process uptime in seconds"))
+	if err != nil {
+		return err
+	}
+
+	filesOpenName := "process_files_open_files"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[filesOpenName]; ok && n != "" {
+			filesOpenName = n
+		}
+	}
+	s.processFilesOpen, err = s.meter.Int64UpDownCounter(filesOpenName,
+		metric.WithDescription("Process open file descriptors"))
+	if err != nil {
+		return err
+	}
+
+	filesMaxName := "process_files_max_files"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[filesMaxName]; ok && n != "" {
+			filesMaxName = n
+		}
+	}
+	s.processFilesMax, err = s.meter.Int64UpDownCounter(filesMaxName,
+		metric.WithDescription("Process max file descriptors"))
+	if err != nil {
+		return err
+	}
+
+	// Hikari
+	hikariActiveName := "hikaricp_connections_active"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[hikariActiveName]; ok && n != "" {
+			hikariActiveName = n
+		}
+	}
+	s.hikariConnectionsActive, err = s.meter.Int64UpDownCounter(hikariActiveName,
+		metric.WithDescription("Hikari active connections"))
+	if err != nil {
+		return err
+	}
+
+	hikariMaxName := "hikaricp_connections_max"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[hikariMaxName]; ok && n != "" {
+			hikariMaxName = n
+		}
+	}
+	s.hikariConnectionsMax, err = s.meter.Int64UpDownCounter(hikariMaxName,
+		metric.WithDescription("Hikari max connections"))
+	if err != nil {
+		return err
+	}
+
+	// Redis / KeyDB
+	redisUsedName := "redis_memory_used_bytes"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[redisUsedName]; ok && n != "" {
+			redisUsedName = n
+		}
+	}
+	s.redisMemoryUsed, err = s.meter.Float64UpDownCounter(redisUsedName,
+		metric.WithDescription("Redis/KeyDB memory used bytes"))
+	if err != nil {
+		return err
+	}
+
+	redisMaxName := "redis_memory_max_bytes"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[redisMaxName]; ok && n != "" {
+			redisMaxName = n
+		}
+	}
+	s.redisMemoryMax, err = s.meter.Float64UpDownCounter(redisMaxName,
+		metric.WithDescription("Redis/KeyDB memory max bytes"))
+	if err != nil {
+		return err
+	}
+
+	redisHitsName := "redis_keyspace_hits_total"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[redisHitsName]; ok && n != "" {
+			redisHitsName = n
+		}
+	}
+	s.redisKeyspaceHits, err = s.meter.Int64Counter(redisHitsName,
+		metric.WithDescription("Redis keyspace hits"))
+	if err != nil {
+		return err
+	}
+
+	redisMissName := "redis_keyspace_misses_total"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[redisMissName]; ok && n != "" {
+			redisMissName = n
+		}
+	}
+	s.redisKeyspaceMisses, err = s.meter.Int64Counter(redisMissName,
+		metric.WithDescription("Redis keyspace misses"))
+	if err != nil {
+		return err
+	}
+
+	redisEvictName := "redis_evicted_keys_total"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[redisEvictName]; ok && n != "" {
+			redisEvictName = n
+		}
+	}
+	s.redisEvictedKeys, err = s.meter.Int64Counter(redisEvictName,
+		metric.WithDescription("Redis key evictions"))
+	if err != nil {
+		return err
+	}
+
+	redisClientsName := "redis_connected_clients"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[redisClientsName]; ok && n != "" {
+			redisClientsName = n
+		}
+	}
+	s.redisConnectedClients, err = s.meter.Int64UpDownCounter(redisClientsName,
+		metric.WithDescription("Redis connected clients"))
+	if err != nil {
+		return err
+	}
+
+	// Kafka
+	kafkaURPName := "kafka_controller_UnderReplicatedPartitions"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional["kafka_controller_UnderReplicatedPartitions"]; ok && n != "" {
+			kafkaURPName = n
+		}
+	}
+	s.kafkaUnderReplicated, err = s.meter.Int64UpDownCounter(kafkaURPName,
+		metric.WithDescription("Kafka under replicated partitions"))
+	if err != nil {
+		return err
+	}
+
+	kafkaReqName := "kafka_network_RequestMetrics_RequestsPerSec"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[kafkaReqName]; ok && n != "" {
+			kafkaReqName = n
+		}
+	}
+	s.kafkaRequestsPerSec, err = s.meter.Float64Counter(kafkaReqName,
+		metric.WithDescription("Kafka network requests per second (incremental)"))
+	if err != nil {
+		return err
+	}
+
+	kafkaBytesName := "kafka_server_BrokerTopicMetrics_BytesInPerSec"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[kafkaBytesName]; ok && n != "" {
+			kafkaBytesName = n
+		}
+	}
+	s.kafkaBytesInPerSec, err = s.meter.Float64Counter(kafkaBytesName,
+		metric.WithDescription("Kafka bytes in per second (incremental)"))
+	if err != nil {
+		return err
+	}
+
+	kafkaErrName := "kafka_network_RequestMetrics_ErrorsPerSec"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[kafkaErrName]; ok && n != "" {
+			kafkaErrName = n
+		}
+	}
+	s.kafkaRequestErrors, err = s.meter.Int64Counter(kafkaErrName,
+		metric.WithDescription("Kafka request errors per second"))
+	if err != nil {
+		return err
+	}
+
+	kafkaISRName := "kafka_controller_IsrShrinksPerSec"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[kafkaISRName]; ok && n != "" {
+			kafkaISRName = n
+		}
+	}
+	s.kafkaISRChanges, err = s.meter.Float64Counter(kafkaISRName,
+		metric.WithDescription("Kafka ISR changes per second (shrinks+expands)"))
+	if err != nil {
+		return err
+	}
+
+	// Node exporter
+	nodeLoadName := "node_load1"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[nodeLoadName]; ok && n != "" {
+			nodeLoadName = n
+		}
+	}
+	s.nodeLoad1, err = s.meter.Float64UpDownCounter(nodeLoadName,
+		metric.WithDescription("1-minute load average"))
+	if err != nil {
+		return err
+	}
+
+	nodeMemAvailName := "node_memory_MemAvailable_bytes"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[nodeMemAvailName]; ok && n != "" {
+			nodeMemAvailName = n
+		}
+	}
+	s.nodeMemoryAvailable, err = s.meter.Float64UpDownCounter(nodeMemAvailName,
+		metric.WithDescription("Node available memory bytes"))
+	if err != nil {
+		return err
+	}
+
+	nodeMemTotalName := "node_memory_MemTotal_bytes"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[nodeMemTotalName]; ok && n != "" {
+			nodeMemTotalName = n
+		}
+	}
+	s.nodeMemoryTotal, err = s.meter.Float64UpDownCounter(nodeMemTotalName,
+		metric.WithDescription("Node total memory bytes"))
+	if err != nil {
+		return err
+	}
+
+	nodeFsAvailName := "node_filesystem_avail_bytes"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[nodeFsAvailName]; ok && n != "" {
+			nodeFsAvailName = n
+		}
+	}
+	s.nodeFilesystemAvail, err = s.meter.Float64UpDownCounter(nodeFsAvailName,
+		metric.WithDescription("Node filesystem available bytes"))
+	if err != nil {
+		return err
+	}
+
+	nodeFsSizeName := "node_filesystem_size_bytes"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[nodeFsSizeName]; ok && n != "" {
+			nodeFsSizeName = n
+		}
+	}
+	s.nodeFilesystemSize, err = s.meter.Float64UpDownCounter(nodeFsSizeName,
+		metric.WithDescription("Node filesystem size bytes"))
+	if err != nil {
+		return err
+	}
+
+	nodeDiskIOName := "node_disk_io_time_seconds_total"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[nodeDiskIOName]; ok && n != "" {
+			nodeDiskIOName = n
+		}
+	}
+	s.nodeDiskIOTimeSeconds, err = s.meter.Float64Counter(nodeDiskIOName,
+		metric.WithDescription("Node disk io time seconds (cumulative)"))
+	if err != nil {
+		return err
+	}
+
+	nodeCtxName := "node_context_switches_total"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[nodeCtxName]; ok && n != "" {
+			nodeCtxName = n
+		}
+	}
+	s.nodeContextSwitches, err = s.meter.Float64Counter(nodeCtxName,
+		metric.WithDescription("Node context switches (incremental)"))
+	if err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// startBackgroundMetrics kicks off background goroutines that produce gauge-like
+// values and counters independent of per-transaction events. It listens to the
+// provided ctx and returns immediately if ctx is already cancelled.
+func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
+	// default interval if unset
+	interval := s.dataInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	// (scenario scheduler and histogram helpers are defined later)
+
+	// initialize reasonable defaults
+	s.stateLock.Lock()
+	if s.stateJvmMax == 0 {
+		s.stateJvmMax = 512 * 1024 * 1024 // 512MB
+	}
+	if s.stateJvmUsed == 0 {
+		s.stateJvmUsed = float64(s.stateJvmMax) * 0.35
+	}
+	if s.stateTomcatMax == 0 {
+		s.stateTomcatMax = 200
+	}
+	if s.stateTomcatBusy == 0 {
+		s.stateTomcatBusy = 10
+	}
+	if s.stateCPU == 0 {
+		s.stateCPU = 4.0
+	}
+	if s.stateProcessUptime == 0 {
+		s.stateProcessUptime = 60 * 60
+	}
+	if s.stateFilesMax == 0 {
+		s.stateFilesMax = 10240
+	}
+	if s.stateFilesOpen == 0 {
+		s.stateFilesOpen = 120
+	}
+	if s.stateHikariMax == 0 {
+		s.stateHikariMax = 100
+	}
+	if s.stateHikariActive == 0 {
+		s.stateHikariActive = 5
+	}
+	if s.stateRedisMax == 0 {
+		s.stateRedisMax = 256 * 1024 * 1024
+	}
+	if s.stateRedisUsed == 0 {
+		s.stateRedisUsed = float64(s.stateRedisMax) * 0.2
+	}
+	if s.stateRedisClients == 0 {
+		s.stateRedisClients = 10
+	}
+	if s.stateKafkaURP == 0 {
+		s.stateKafkaURP = 0
+	}
+	if s.stateNodeMemTotal == 0 {
+		s.stateNodeMemTotal = 4 * 1024 * 1024 * 1024 // 4GB
+	}
+	if s.stateNodeMemAvail == 0 {
+		s.stateNodeMemAvail = s.stateNodeMemTotal * 0.6
+	}
+	if s.stateNodeLoad1 == 0 {
+		s.stateNodeLoad1 = 0.4
+	}
+	if s.stateFsSize == 0 {
+		s.stateFsSize = 120 * 1024 * 1024 * 1024 // 120GB
+	}
+	if s.stateFsAvail == 0 {
+		s.stateFsAvail = s.stateFsSize * 0.7
+	}
+	s.stateLock.Unlock()
+
+	// initialize multipliers
+	s.stateDbLatencyMult = 1.0
+	s.stateGCPauseMult = 1.0
+	s.stateFailureMult = 1.0
+	s.stateTomcatLoadMult = 1.0
+	s.stateRedisMemoryMult = 1.0
+	s.stateKafkaURPMult = 1.0
+
+	// background ticker
+	ticker := time.NewTicker(interval)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+			case <-ticker.C:
+				// reset multipliers to 1.0 then apply any active scenario effects
+				if s.scenarioSched != nil {
+					// default
+					s.stateDbLatencyMult = 1.0
+					s.stateGCPauseMult = 1.0
+					s.stateFailureMult = 1.0
+					s.stateTomcatLoadMult = 1.0
+					s.stateRedisMemoryMult = 1.0
+					s.stateKafkaURPMult = 1.0
+					now := time.Now()
+					active := s.scenarioSched.activeAt(now)
+					for _, e := range active {
+						for _, eff := range e.effects {
+							switch eff.Metric {
+							case "db_latency", "db_latency_seconds":
+								switch eff.Op {
+								case "scale":
+									s.stateDbLatencyMult *= eff.Value
+								case "add":
+									s.stateDbLatencyMult += eff.Value
+								case "set":
+									s.stateDbLatencyMult = eff.Value
+								case "ramp":
+									s.stateDbLatencyMult += eff.Step
+								}
+							case "jvm_gc", "jvm_gc_pause_seconds":
+								switch eff.Op {
+								case "scale":
+									s.stateGCPauseMult *= eff.Value
+								case "add":
+									s.stateGCPauseMult += eff.Value
+								case "set":
+									s.stateGCPauseMult = eff.Value
+								case "ramp":
+									s.stateGCPauseMult += eff.Step
+								}
+							case "transaction_failures", "transactions_failed_total":
+								switch eff.Op {
+								case "scale":
+									s.stateFailureMult *= eff.Value
+								case "add":
+									s.stateFailureMult += eff.Value
+								case "set":
+									s.stateFailureMult = eff.Value
+								case "ramp":
+									s.stateFailureMult += eff.Step
+								}
+							case "tomcat_threads", "tomcat_threads_busy_threads":
+								switch eff.Op {
+								case "scale":
+									s.stateTomcatLoadMult *= eff.Value
+								case "add":
+									s.stateTomcatLoadMult += eff.Value
+								case "set":
+									s.stateTomcatLoadMult = eff.Value
+								case "ramp":
+									s.stateTomcatLoadMult += eff.Step
+								}
+							case "redis_memory", "redis_memory_used_bytes":
+								switch eff.Op {
+								case "scale":
+									s.stateRedisMemoryMult *= eff.Value
+								case "add":
+									s.stateRedisMemoryMult += eff.Value
+								case "set":
+									s.stateRedisMemoryMult = eff.Value
+								case "ramp":
+									s.stateRedisMemoryMult += eff.Step
+								}
+							case "kafka_urp", "kafka_controller_UnderReplicatedPartitions":
+								switch eff.Op {
+								case "scale":
+									s.stateKafkaURPMult *= eff.Value
+								case "add":
+									s.stateKafkaURPMult += eff.Value
+								case "set":
+									s.stateKafkaURPMult = eff.Value
+								case "ramp":
+									s.stateKafkaURPMult += eff.Step
+								}
+							default:
+								// unknown metric - ignore; we may wish to extend later
+							}
+						}
+					}
+				}
+				// mutate state with small random walk, and record metrics as deltas
+				// JVM memory used: random walk between 10%-95% of max
+				{
+					s.stateLock.Lock()
+					// small noise
+					delta := (s.rng.Float64() - 0.5) * 0.05 * float64(s.stateJvmMax)
+					next := s.stateJvmUsed + delta
+					if next < float64(s.stateJvmMax)*0.05 {
+						next = float64(s.stateJvmMax) * 0.05
+					}
+					if next > float64(s.stateJvmMax)*0.98 {
+						next = float64(s.stateJvmMax) * 0.98
+					}
+					add := next - s.stateJvmUsed
+					if add != 0 {
+						s.jvmMemoryUsed.Add(ctx, add)
+					}
+					s.stateJvmUsed = next
+					s.jvmMemoryMax.Add(ctx, s.stateJvmMax-s.stateJvmMax) // ensure max exists (delta 0)
+					s.stateLock.Unlock()
+				}
+
+				// GC pauses: small incremental counts and sums; occasionally a spike
+				gcAdd := (0.001 + s.rng.Float64()*0.005) * s.stateGCPauseMult // seconds
+				if s.rng.Float64() < 0.01 {                                   // rare long pause
+					gcAdd += s.rng.Float64() * 0.5
+				}
+				s.jvmGCPauseSecondsSum.Add(ctx, gcAdd)
+				s.jvmGCPauseSecondsCount.Add(ctx, 1)
+
+				// Tomcat thread pool
+				{
+					s.stateLock.Lock()
+					change := int64(s.rng.Intn(5) - 2)
+					// scale tomcat thread busy changes by scenario multiplier
+					change = int64(float64(change) * s.stateTomcatLoadMult)
+					nextBusy := s.stateTomcatBusy + change
+					if nextBusy < 0 {
+						nextBusy = 0
+					}
+					if nextBusy > s.stateTomcatMax {
+						nextBusy = s.stateTomcatMax
+					}
+					delta := nextBusy - s.stateTomcatBusy
+					if delta != 0 {
+						s.tomcatThreadsBusy.Add(ctx, delta)
+					}
+					s.stateTomcatBusy = nextBusy
+					// queue grows when nearing max
+					load := float64(s.stateTomcatBusy) / float64(s.stateTomcatMax)
+					q := load * s.rng.Float64() * 2.0 * s.stateTomcatLoadMult
+					qDelta := q - s.stateTomcatQueue
+					if qDelta != 0 {
+						s.tomcatThreadsQueueSec.Add(ctx, qDelta)
+					}
+					s.stateTomcatQueue = q
+					s.stateLock.Unlock()
+				}
+
+				// process CPU usage small fluctuations
+				{
+					s.stateLock.Lock()
+					cpuDelta := (s.rng.Float64() - 0.5) * 2.0
+					nextCPU := s.stateCPU + cpuDelta
+					if nextCPU < 0 {
+						nextCPU = 0
+					}
+					if nextCPU > 100 {
+						nextCPU = 100
+					}
+					if nextCPU != s.stateCPU {
+						s.processCPUUsage.Add(ctx, nextCPU-s.stateCPU)
+					}
+					s.stateCPU = nextCPU
+					s.stateLock.Unlock()
+				}
+
+				// Hikari connection pool usage
+				{
+					s.stateLock.Lock()
+					connDelta := int64(s.rng.Intn(3) - 1)
+					nextConn := s.stateHikariActive + connDelta
+					if nextConn < 0 {
+						nextConn = 0
+					}
+					if nextConn > s.stateHikariMax {
+						nextConn = s.stateHikariMax
+					}
+					if nextConn != s.stateHikariActive {
+						s.hikariConnectionsActive.Add(ctx, nextConn-s.stateHikariActive)
+					}
+					s.stateHikariActive = nextConn
+					s.stateLock.Unlock()
+				}
+
+				// Redis memory usage
+				{
+					s.stateLock.Lock()
+					memDelta := (s.rng.Float64() - 0.5) * float64(5*1024*1024) * s.stateRedisMemoryMult
+					next := s.stateRedisUsed + memDelta
+					if next < 0 {
+						next = 0
+					}
+					if next > s.stateRedisMax {
+						next = s.stateRedisMax
+						// start evictions when overflow
+						s.redisEvictedKeys.Add(ctx, 1)
+					}
+					if next != s.stateRedisUsed {
+						s.redisMemoryUsed.Add(ctx, next-s.stateRedisUsed)
+					}
+					s.stateRedisUsed = next
+					s.stateLock.Unlock()
+				}
+
+				// Kafka under-replicated partitions may happen rarely
+				if s.rng.Float64() < 0.005*s.stateKafkaURPMult {
+					delta := int64(float64(s.rng.Intn(5)+1) * s.stateKafkaURPMult)
+					s.kafkaUnderReplicated.Add(ctx, delta)
+					s.stateKafkaURP += delta
+				}
+
+				// Node exporter periodic counters
+				{
+					s.nodeDiskIOTimeSeconds.Add(ctx, s.rng.Float64()*0.1)
+					s.nodeContextSwitches.Add(ctx, s.rng.Float64()*10)
+				}
+
+				// Kafka request rate & bytes-in/second counters (incremental)
+				s.kafkaRequestsPerSec.Add(ctx, 50+s.rng.Float64()*200)
+				s.kafkaBytesInPerSec.Add(ctx, 1024+s.rng.Float64()*10*1024)
+			}
+		}
+	}()
 }
 
 // initLogger sets a logger for the simulator. Supported modes: "nop" (no-op), "stdout" (development stdout)
@@ -676,6 +1510,8 @@ func (s *Simulator) initLogger(mode string) {
 }
 
 func (s *Simulator) runSimulation(ctx context.Context) {
+	// start background metrics generator
+	go s.startBackgroundMetrics(ctx)
 	// Calculate time distribution
 	var timestamps []time.Time
 
@@ -788,16 +1624,30 @@ func (s *Simulator) simulateTransaction(ctx context.Context, transactionID strin
 	start := time.Now()
 
 	// Generate transaction details
-	amountPaise := s.minAmountPaise + rand.Int63n(s.maxAmountPaise-s.minAmountPaise+1)
-	customerID := fmt.Sprintf("cust-%04d", rand.Intn(10000))
-	channel := []string{"mobile", "web", "api"}[rand.Intn(3)]
+	amountPaise := s.minAmountPaise + s.rng.Int63n(s.maxAmountPaise-s.minAmountPaise+1)
+	customerID := fmt.Sprintf("cust-%04d", s.rng.Intn(10000))
+	channel := []string{"mobile", "web", "api"}[s.rng.Intn(3)]
+
+	// labels: OrgId/OrgName/transaction_type (configurable)
+	var orgId, orgName, txType string
+	if len(s.telemCfg.Labels.OrgIds) > 0 {
+		orgId = s.telemCfg.Labels.OrgIds[s.rng.Intn(len(s.telemCfg.Labels.OrgIds))]
+	}
+	if len(s.telemCfg.Labels.OrgNames) > 0 {
+		orgName = s.telemCfg.Labels.OrgNames[s.rng.Intn(len(s.telemCfg.Labels.OrgNames))]
+	}
+	if len(s.telemCfg.Labels.TransactionTypes) > 0 {
+		txType = s.telemCfg.Labels.TransactionTypes[s.rng.Intn(len(s.telemCfg.Labels.TransactionTypes))]
+	}
 
 	// Determine if this transaction should fail
 	var shouldFail bool
 	if s.failureSched != nil {
 		shouldFail = s.failureSched.ShouldFail(time.Now())
 	} else {
-		shouldFail = rand.Float64() < s.failureRate
+		// apply scenario-driven multiplier to failure rate
+		effRate := s.failureRate * s.stateFailureMult
+		shouldFail = s.rng.Float64() < effRate
 	}
 	var failureComponent string
 	if shouldFail {
@@ -814,7 +1664,7 @@ func (s *Simulator) simulateTransaction(ctx context.Context, transactionID strin
 			failureComponent = "tps"
 		case FailureModeMixed:
 			components := []string{"kafka", "cassandra", "keydb", "api-gateway", "tps"}
-			failureComponent = components[rand.Intn(len(components))]
+			failureComponent = components[s.rng.Intn(len(components))]
 		}
 	}
 
@@ -893,16 +1743,29 @@ func (s *Simulator) simulateTransaction(ctx context.Context, transactionID strin
 	}
 
 	// Record final metrics
-	s.transactionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("service_name", apiGatewayName)))
-	s.transactionAmountSum.Add(ctx, result.AmountPaise, metric.WithAttributes(attribute.String("currency", currencyINR)))
-	s.transactionAmountCount.Add(ctx, 1, metric.WithAttributes(attribute.String("currency", currencyINR)))
-
-	if result.FinalStatus == "error" {
-		s.transactionsFailedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("service_name", apiGatewayName)))
+	attrs := []attribute.KeyValue{attribute.String("service_name", apiGatewayName)}
+	if orgId != "" {
+		attrs = append(attrs, attribute.String("OrgId", orgId))
+	}
+	if orgName != "" {
+		attrs = append(attrs, attribute.String("OrgName", orgName))
+	}
+	if txType != "" {
+		attrs = append(attrs, attribute.String("transaction_type", txType))
 	}
 
-	duration := time.Since(start).Seconds()
-	s.transactionLatency.Record(ctx, duration, metric.WithAttributes(attribute.String("service_name", apiGatewayName)))
+	s.transactionsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	s.transactionAmountSum.Add(ctx, result.AmountPaise, metric.WithAttributes(append(attrs, attribute.String("currency", currencyINR))...))
+	s.transactionAmountCount.Add(ctx, 1, metric.WithAttributes(append(attrs, attribute.String("currency", currencyINR))...))
+
+	if result.FinalStatus == "error" {
+		s.transactionsFailedTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	}
+
+	duration := time.Since(start).Seconds() * s.stateDbLatencyMult
+	// record both OTLP histogram and Prom-style bucket counters
+	s.transactionLatency.Record(ctx, duration, metric.WithAttributes(attrs...))
+	s.recordTransactionLatencyBuckets(ctx, duration, attrs...)
 }
 
 func (s *Simulator) simulateTPS(ctx context.Context, transactionID string, amountPaise int64, customerID string, failureComponent string, shouldFail bool) TransactionResult {
@@ -985,7 +1848,7 @@ func (s *Simulator) simulateTPS(ctx context.Context, transactionID string, amoun
 			}
 		case step >= 17 && step <= 20:
 			// Internal processing
-			time.Sleep(time.Duration(10+rand.Intn(20)) * time.Millisecond)
+			time.Sleep(time.Duration(10+s.rng.Intn(20)) * time.Millisecond)
 		case step == 21:
 			// Produce to Kafka
 			if err := s.simulateKafkaProduce(stepCtx, transactionID, amountPaise, failureComponent == "kafka" && shouldFail); err != nil {
@@ -1006,7 +1869,7 @@ func (s *Simulator) simulateTPS(ctx context.Context, transactionID string, amoun
 			}
 		case step == 22:
 			// Final commit
-			time.Sleep(time.Duration(5+rand.Intn(10)) * time.Millisecond)
+			time.Sleep(time.Duration(5+s.rng.Intn(10)) * time.Millisecond)
 		}
 
 		stepSpan.End()
@@ -1045,11 +1908,12 @@ func (s *Simulator) simulateCassandraOp(ctx context.Context, transactionID, oper
 	}
 
 	// Simulate latency
-	time.Sleep(time.Duration(20+rand.Intn(30)) * time.Millisecond)
-	duration := time.Since(start).Seconds()
+	time.Sleep(time.Duration(20+s.rng.Intn(30)) * time.Millisecond)
+	duration := time.Since(start).Seconds() * s.stateDbLatencyMult
 
 	s.dbOpsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("db_system", "cassandra")))
 	s.dbLatency.Record(ctx, duration, metric.WithAttributes(attribute.String("db_system", "cassandra")))
+	s.recordDBLatencyBuckets(ctx, duration, attribute.String("db_system", "cassandra"))
 
 	return nil
 }
@@ -1084,11 +1948,12 @@ func (s *Simulator) simulateKeyDBOp(ctx context.Context, transactionID, operatio
 	}
 
 	// Simulate latency
-	time.Sleep(time.Duration(5+rand.Intn(15)) * time.Millisecond)
-	duration := time.Since(start).Seconds()
+	time.Sleep(time.Duration(5+s.rng.Intn(15)) * time.Millisecond)
+	duration := time.Since(start).Seconds() * s.stateDbLatencyMult
 
 	s.dbOpsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("db_system", "valkey")))
 	s.dbLatency.Record(ctx, duration, metric.WithAttributes(attribute.String("db_system", "valkey")))
+	s.recordDBLatencyBuckets(ctx, duration, attribute.String("db_system", "valkey"))
 
 	return nil
 }
@@ -1118,8 +1983,8 @@ func (s *Simulator) simulateKafkaProduce(ctx context.Context, transactionID stri
 	}
 
 	// Simulate latency
-	time.Sleep(time.Duration(10+rand.Intn(20)) * time.Millisecond)
-	duration := time.Since(start).Seconds()
+	time.Sleep(time.Duration(10+s.rng.Intn(20)) * time.Millisecond)
+	duration := time.Since(start).Seconds() * s.stateDbLatencyMult
 
 	s.kafkaProduceTotal.Add(ctx, 1,
 		metric.WithAttributes(
@@ -1160,7 +2025,7 @@ func (s *Simulator) simulateKafkaConsumer(ctx context.Context, transactionID str
 	}
 
 	// Simulate processing delay
-	time.Sleep(time.Duration(50+rand.Intn(100)) * time.Millisecond)
+	time.Sleep(time.Duration(50+s.rng.Intn(100)) * time.Millisecond)
 
 	// Write final state to Cassandra
 	if err := s.simulateCassandraOp(ctx, transactionID, "final_state_write", false); err != nil {
@@ -1207,7 +2072,7 @@ func (s *Simulator) simulateAPIGatewayKafkaConsumer(ctx context.Context, transac
 	}
 
 	// Simulate processing delay
-	time.Sleep(time.Duration(50+rand.Intn(100)) * time.Millisecond)
+	time.Sleep(time.Duration(50+s.rng.Intn(100)) * time.Millisecond)
 
 	// API Gateway writes final state to Cassandra
 	if err := s.simulateAPIGatewayCassandraWrite(ctx, transactionID, "final_state_write", false); err != nil {
@@ -1252,11 +2117,115 @@ func (s *Simulator) simulateAPIGatewayCassandraWrite(ctx context.Context, transa
 	}
 
 	// Simulate latency
-	time.Sleep(time.Duration(20+rand.Intn(30)) * time.Millisecond)
+	time.Sleep(time.Duration(20+s.rng.Intn(30)) * time.Millisecond)
 	duration := time.Since(start).Seconds()
 
 	s.dbOpsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("db_system", "cassandra")))
 	s.dbLatency.Record(ctx, duration, metric.WithAttributes(attribute.String("db_system", "cassandra")))
+	s.recordDBLatencyBuckets(ctx, duration, attribute.String("db_system", "cassandra"))
 
 	return nil
+}
+
+// recordTransactionLatencyBuckets updates Prometheus-style cumulative bucket counters
+// and the associated _sum and _count for transaction latency. attrs should include
+// any attributes (e.g., service_name, OrgId) to be attached to the metric.
+func (s *Simulator) recordTransactionLatencyBuckets(ctx context.Context, v float64, attrs ...attribute.KeyValue) {
+	// ensure underlying histogram recorded (OTel) was already called; update explicit counters for PromQL
+	for _, b := range s.transactionLatencyBuckets {
+		if v <= b {
+			// le label as string
+			le := fmt.Sprintf("%g", b)
+			// combine attrs with le attribute
+			combined := append(attrs, attribute.String("le", le))
+			s.transactionLatencyBucket.Add(ctx, 1.0, metric.WithAttributes(combined...))
+		}
+	}
+	// +Inf bucket always receives the count
+	combinedInf := append(attrs, attribute.String("le", "+Inf"))
+	s.transactionLatencyBucket.Add(ctx, 1.0, metric.WithAttributes(combinedInf...))
+
+	// sum and count
+	s.transactionLatencySum.Add(ctx, v, metric.WithAttributes(attrs...))
+	s.transactionLatencyCount.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// recordDBLatencyBuckets updates DB histogram counters similarly
+func (s *Simulator) recordDBLatencyBuckets(ctx context.Context, v float64, attrs ...attribute.KeyValue) {
+	for _, b := range s.dbLatencyBuckets {
+		if v <= b {
+			le := fmt.Sprintf("%g", b)
+			combined := append(attrs, attribute.String("le", le))
+			s.dbLatencyBucket.Add(ctx, 1.0, metric.WithAttributes(combined...))
+		}
+	}
+	combinedInf := append(attrs, attribute.String("le", "+Inf"))
+	s.dbLatencyBucket.Add(ctx, 1.0, metric.WithAttributes(combinedInf...))
+
+	s.dbLatencySum.Add(ctx, v, metric.WithAttributes(attrs...))
+	s.dbLatencyCount.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// scenarioScheduler implements runtime schedule for configured scenarios.
+type scenarioScheduler struct {
+	entries []struct {
+		start   time.Time
+		end     time.Time
+		labels  map[string][]string
+		effects []Effect
+		name    string
+	}
+}
+
+// newScenarioScheduler builds scheduler entries from failure config scenarios.
+func newScenarioScheduler(cfg FailureConfig, simStart time.Time) (*scenarioScheduler, error) {
+	ss := &scenarioScheduler{}
+	for _, sc := range cfg.Scenarios {
+		var s time.Time
+		if d, err := time.ParseDuration(sc.Start); err == nil {
+			s = simStart.Add(d)
+		} else if t, err := time.Parse(time.RFC3339, sc.Start); err == nil {
+			s = t
+		} else {
+			return nil, fmt.Errorf("invalid scenario start: %s", sc.Start)
+		}
+
+		dur, err := time.ParseDuration(sc.Duration)
+		if err != nil {
+			return nil, fmt.Errorf("invalid scenario duration: %s", sc.Duration)
+		}
+
+		ss.entries = append(ss.entries, struct {
+			start   time.Time
+			end     time.Time
+			labels  map[string][]string
+			effects []Effect
+			name    string
+		}{start: s, end: s.Add(dur), labels: sc.Labels, effects: sc.Effects, name: sc.Name})
+	}
+
+	return ss, nil
+}
+
+// activeAt returns the active entries at given time.
+func (ss *scenarioScheduler) activeAt(at time.Time) []struct {
+	start   time.Time
+	end     time.Time
+	labels  map[string][]string
+	effects []Effect
+	name    string
+} {
+	var out []struct {
+		start   time.Time
+		end     time.Time
+		labels  map[string][]string
+		effects []Effect
+		name    string
+	}
+	for _, e := range ss.entries {
+		if !at.Before(e.start) && at.Before(e.end) {
+			out = append(out, e)
+		}
+	}
+	return out
 }

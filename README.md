@@ -105,20 +105,52 @@ Behavior notes
 - If `--config` is not provided or the `failure` section is absent, the simulator falls back to the CLI flags `--failure-rate` and `--failure-mode` (original behaviour).
 - If the YAML `failure.seed` is set, the simulator seeds randomness for deterministic runs, which is useful for reproducible demos/tests.
 
-### Failure Scenarios
+### Failure scenarios (config-driven)
 
-The simulator can inject realistic failure patterns:
+The simulator supports richer, configuration-driven scenario injection. Use the `failure.scenarios` block in `simulator-config.yaml` to declare correlated, multi-metric scenarios. Each scenario contains a `start`, `duration`, optional `labels` (to scope the scenario to specific label values) and a list of `effects`.
 
-```bash
-# Inject database latency spike
-INJECT_DB_LATENCY=true ./bin/otel-fintrans-simulator
+An effect targets a named simulator dimension or metric and uses one of the following operations:
+- `scale` — multiply the target by the specified value
+- `add` — add the specified value
+- `set` — set the target to the given value
+- `ramp` — increment the target by `step` on each simulation tick
 
-# Inject Kafka producer failures
-INJECT_KAFKA_FAILURES=true ./bin/otel-fintrans-simulator
+Example (see `simulator-config.yaml` in repo):
 
-# Inject cascading failures
-INJECT_CASCADING_FAILURES=true ./bin/otel-fintrans-simulator
+```yaml
+failure:
+  scenarios:
+    - name: "db_slow_cascade"
+      start: "5s"
+      duration: "60s"
+      labels:
+        OrgId: ["bank_01", "bank_02"]
+      effects:
+        - metric: "db_latency"
+          op: "scale"
+          value: 5.0
+        - metric: "jvm_gc"
+          op: "scale"
+          value: 3.0
+        - metric: "transaction_failures"
+          op: "scale"
+          value: 4.0
+
+    - name: "bank03_outage"
+      start: "20s"
+      duration: "40s"
+      labels:
+        OrgId: ["bank_03"]
+      effects:
+        - metric: "kafka_controller_UnderReplicatedPartitions"
+          op: "add"
+          value: 2
+        - metric: "transaction_failures"
+          op: "scale"
+          value: 8.0
 ```
+
+When a scenario is active the simulator applies its effects to the runtime state during each background tick. You can mix bursts (simple failure-rate multipliers) with scenario windows for rich, realistic fault patterns.
 
 ## Integration with Mirador Core
 
@@ -256,6 +288,30 @@ Additional instrumentation notes (metrics & labels) ✅
 -----------------------------------------------
 - Use clear, dedicated metrics for each subsystem's latency (e.g., `kafka_produce_latency_seconds`, `kafka_consume_latency_seconds`) instead of recording Kafka latency into `db_latency_seconds` to avoid conflating database and messaging latencies. (Implemented in code: kafka latency histograms are registered and used.)
 - Ensure key metric instruments include useful attributes such as `service_name`, `messaging.destination` (topic), and `db_system` where appropriate to make traces/metrics more useful for RCA and correlation.
+
+Histogram & PromQL compatibility
+--------------------------------
+To support PromQL queries that use histogram_quantile() the simulator emits Prom-style histogram counters for key latency metrics in addition to OpenTelemetry histograms. For example `transaction_latency_seconds` has these exported counters:
+
+- `transaction_latency_seconds_bucket{le="..."}` (monotonic cumulative buckets)
+- `transaction_latency_seconds_sum` (monotonic sum of latencies)
+- `transaction_latency_seconds_count` (monotonic count)
+
+Same applies for `db_latency_seconds` and other configured histogram metrics. The simulator emits these bucketed counters with the same attributes and labels you configure (e.g., `service_name`, `OrgId`) so PromQL queries like `histogram_quantile(0.95, sum(rate(transaction_latency_seconds_bucket[5m])) by (le))` will return meaningful values.
+
+Labels and cardinality
+----------------------
+The simulator can emit attributes (labels) on metrics and traces — configured under `telemetry.labels` in `simulator-config.yaml`. Typical label sets include `OrgId`, `OrgName`, and `transaction_type`. Keep label cardinality small (5-25 unique values) to avoid large memory and ingestion costs in backends.
+
+Example label config in `simulator-config.yaml`:
+
+```yaml
+telemetry:
+  labels:
+    org_ids: ["bank_01","bank_02","bank_03"]
+    org_names: ["BankOne","BankTwo","BankThree"]
+    transaction_types: ["merchant_payment","p2p","bill_payment"]
+```
 
 
 We'll take these up one at a time — the already completed items (4 and 7) are marked above. Tell me which remaining item you'd like me to start next and I’ll open a focused PR/branch for it.

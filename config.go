@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"time"
 
-	"io/ioutil"
+	"os"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,15 +22,16 @@ type TelemetryConfig struct {
 	} `yaml:"service_names"`
 
 	MetricNames struct {
-		TransactionsTotal      string `yaml:"transactions_total"`
-		TransactionsFailed     string `yaml:"transactions_failed_total"`
-		DBOpsTotal             string `yaml:"db_ops_total"`
-		KafkaProduceTotal      string `yaml:"kafka_produce_total"`
-		KafkaConsumeTotal      string `yaml:"kafka_consume_total"`
-		TransactionLatency     string `yaml:"transaction_latency_seconds"`
-		DBLatency              string `yaml:"db_latency_seconds"`
-		TransactionAmountSum   string `yaml:"transaction_amount_paisa_sum"`
-		TransactionAmountCount string `yaml:"transaction_amount_paisa_count"`
+		TransactionsTotal      string            `yaml:"transactions_total"`
+		TransactionsFailed     string            `yaml:"transactions_failed_total"`
+		DBOpsTotal             string            `yaml:"db_ops_total"`
+		KafkaProduceTotal      string            `yaml:"kafka_produce_total"`
+		KafkaConsumeTotal      string            `yaml:"kafka_consume_total"`
+		TransactionLatency     string            `yaml:"transaction_latency_seconds"`
+		DBLatency              string            `yaml:"db_latency_seconds"`
+		TransactionAmountSum   string            `yaml:"transaction_amount_paisa_sum"`
+		TransactionAmountCount string            `yaml:"transaction_amount_paisa_count"`
+		Additional             map[string]string `yaml:"additional,omitempty"`
 	} `yaml:"metric_names"`
 
 	// Outputs controls where telemetry is shipped. Supported values: "otlp", "stdout".
@@ -42,6 +43,14 @@ type TelemetryConfig struct {
 	Insecure bool `yaml:"insecure,omitempty"`
 	// If true and TLS is used, skip TLS certificate verification (InsecureSkipVerify).
 	SkipTLSVerify bool `yaml:"skip_tls_verify,omitempty"`
+
+	// Labels contains sets of values the simulator will use when emitting
+	// attributes (labels) on metrics and traces. Keep cardinality small.
+	Labels struct {
+		OrgIds           []string `yaml:"org_ids,omitempty"`
+		OrgNames         []string `yaml:"org_names,omitempty"`
+		TransactionTypes []string `yaml:"transaction_types,omitempty"`
+	} `yaml:"labels,omitempty"`
 }
 
 // Burst describes a temporary window where failure probability is increased.
@@ -60,6 +69,31 @@ type FailureConfig struct {
 	Rate   float64 `yaml:"rate"` // base probability 0..1
 	Seed   *int64  `yaml:"seed,omitempty"`
 	Bursts []Burst `yaml:"bursts,omitempty"`
+	// Scenarios define more complex, correlated failure/signal injections.
+	// Each scenario has a start/duration and a list of effects. Effects target
+	// simulator-level dimensions (db_latency, jvm_gc_pressure, transaction_failures, etc.)
+	// and can be applied as 'scale', 'add', 'set' or 'ramp'. See README/usage for examples.
+	Scenarios []Scenario `yaml:"scenarios,omitempty"`
+}
+
+// Scenario defines a multi-metric, correlated injection window.
+type Scenario struct {
+	Name     string `yaml:"name"`
+	Start    string `yaml:"start"`    // relative duration (e.g. "10s") or absolute RFC3339
+	Duration string `yaml:"duration"` // e.g. "30s"
+	// Labels narrow the scope for this scenario (e.g., OrgId values this scenario should affect)
+	Labels map[string][]string `yaml:"labels,omitempty"`
+	// Effects describe what to change and how (metric name, operation, value)
+	Effects []Effect `yaml:"effects,omitempty"`
+}
+
+// Effect describes a single modification to a named effect target.
+type Effect struct {
+	Metric string  `yaml:"metric"` // e.g. "db_latency", "transaction_failures", "jvm_gc_pressure"
+	Op     string  `yaml:"op"`     // "scale", "add", "set", "ramp"
+	Value  float64 `yaml:"value"`  // scale factor or absolute value
+	// Optional per-tick step for ramps (applies each background tick) - if 0, immediate
+	Step float64 `yaml:"step,omitempty"`
 }
 
 // SimulatorConfig is the top-level configuration for the simulator
@@ -75,7 +109,7 @@ func LoadConfig(path string) (*SimulatorConfig, error) {
 		return &SimulatorConfig{}, nil
 	}
 
-	bytes, err := ioutil.ReadFile(path)
+	bytes, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}

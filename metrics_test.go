@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func TestInitMetrics_noError(t *testing.T) {
@@ -65,6 +66,62 @@ func TestRunSimulation_StopsOnContextCancel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("runSimulation did not stop after context cancellation")
 	}
+}
+
+func TestBackgroundMetrics_noPanic(t *testing.T) {
+	sim := &Simulator{tracer: otel.Tracer("test"), meter: otel.Meter("test"), logger: zap.NewNop()}
+	if err := sim.initMetrics(context.Background()); err != nil {
+		t.Fatalf("initMetrics failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// start background metrics and ensure it runs briefly without panic
+	go sim.startBackgroundMetrics(ctx)
+
+	// wait until done or timeout
+	<-ctx.Done()
+}
+
+func TestScenarioScheduler_parsing(t *testing.T) {
+	now := time.Now()
+	cfg := FailureConfig{
+		Mode: "random",
+		Scenarios: []Scenario{
+			{
+				Name:     "test-scn",
+				Start:    "0s",
+				Duration: "1m",
+				Effects:  []Effect{{Metric: "db_latency", Op: "scale", Value: 3.0}},
+			},
+		},
+	}
+
+	ss, err := newScenarioScheduler(cfg, now)
+	if err != nil {
+		t.Fatalf("newScenarioScheduler failed: %v", err)
+	}
+	if len(ss.entries) != 1 {
+		t.Fatalf("expected 1 entry; got %d", len(ss.entries))
+	}
+	// it should be active at now
+	active := ss.activeAt(now)
+	if len(active) != 1 {
+		t.Fatalf("expected active scenarios at now; got %d", len(active))
+	}
+}
+
+func TestHistogramBucketRecording_noPanic(t *testing.T) {
+	sim := &Simulator{tracer: otel.Tracer("test"), meter: otel.Meter("test"), logger: zap.NewNop()}
+	if err := sim.initMetrics(context.Background()); err != nil {
+		t.Fatalf("initMetrics failed: %v", err)
+	}
+
+	// record a few sample values to buckets
+	ctx := context.Background()
+	sim.recordTransactionLatencyBuckets(ctx, 0.12, attribute.String("service_name", "api-gateway"))
+	sim.recordDBLatencyBuckets(ctx, 0.002, attribute.String("db_system", "cassandra"))
 }
 
 func TestInitOTel_stdoutOnly(t *testing.T) {
