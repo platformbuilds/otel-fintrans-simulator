@@ -1306,23 +1306,23 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 	if s.stateRedisUsed == 0 {
 		s.stateRedisUsed = float64(s.stateRedisMax) * 0.2
 	}
-	       if s.stateRedisMasterOffset == 0 {
-		       n := int64(10000)
-		       if n < 1 {
-			       n = 1
-		       }
-		       s.stateRedisMasterOffset = int64(1000 + s.rng.Int63n(n))
-	       }
-	       if s.stateRedisSlaveOffset == 0 {
-		       // slightly behind master
-		       n := int64(200)
-		       if n < 1 {
-			       n = 1
-		       }
-		       s.stateRedisSlaveOffset = s.stateRedisMasterOffset - int64(50+s.rng.Int63n(n))
-		       if s.stateRedisSlaveOffset < 0 {
-			       s.stateRedisSlaveOffset = 0
-		       }
+	if s.stateRedisMasterOffset == 0 {
+		n := int64(10000)
+		if n < 1 {
+			n = 1
+		}
+		s.stateRedisMasterOffset = int64(1000 + s.rng.Int63n(n))
+	}
+	if s.stateRedisSlaveOffset == 0 {
+		// slightly behind master
+		n := int64(200)
+		if n < 1 {
+			n = 1
+		}
+		s.stateRedisSlaveOffset = s.stateRedisMasterOffset - int64(50+s.rng.Int63n(n))
+		if s.stateRedisSlaveOffset < 0 {
+			s.stateRedisSlaveOffset = 0
+		}
 	}
 	if s.stateRedisClients == 0 {
 		s.stateRedisClients = 10
@@ -1554,11 +1554,11 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 				// Tomcat thread pool
 				{
 					s.stateLock.Lock()
-					   n := 5
-					   if n <= 0 {
-						   n = 1
-					   }
-					   change := int64(s.rng.Intn(n) - 2)
+					n := 5
+					if n <= 0 {
+						n = 1
+					}
+					change := int64(s.rng.Intn(n) - 2)
 					// scale tomcat thread busy changes by scenario multiplier
 					change = int64(float64(change) * s.stateTomcatLoadMult)
 					nextBusy := s.stateTomcatBusy + change
@@ -1605,11 +1605,11 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 				// Hikari connection pool usage
 				{
 					s.stateLock.Lock()
-					   n := 3
-					   if n <= 0 {
-						   n = 1
-					   }
-					   connDelta := int64(s.rng.Intn(n) - 1)
+					n := 3
+					if n <= 0 {
+						n = 1
+					}
+					connDelta := int64(s.rng.Intn(n) - 1)
 					nextConn := s.stateHikariActive + connDelta
 					if nextConn < 0 {
 						nextConn = 0
@@ -1648,11 +1648,11 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 				{
 					s.stateLock.Lock()
 					// master progress (random-ish), scaled by scenario multiplier
-					       n := int64(500)
-					       if n < 1 {
-						       n = 1
-					       }
-					       masterInc := int64(10 + s.rng.Int63n(n))
+					n := int64(500)
+					if n < 1 {
+						n = 1
+					}
+					masterInc := int64(10 + s.rng.Int63n(n))
 					if s.stateRedisMasterReplMult != 1.0 {
 						masterInc = int64(float64(masterInc) * s.stateRedisMasterReplMult)
 					}
@@ -1666,11 +1666,11 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 					s.stateRedisMasterOffset = nextMaster
 
 					// slave tries to follow master but lags
-						       n = int64(200)
-						       if n < 1 {
-							       n = 1
-						       }
-						       lag := int64(1 + s.rng.Int63n(n))
+					n = int64(200)
+					if n < 1 {
+						n = 1
+					}
+					lag := int64(1 + s.rng.Int63n(n))
 					if s.stateRedisSlaveReplMult != 1.0 {
 						lag = int64(float64(lag) * s.stateRedisSlaveReplMult)
 					}
@@ -1686,15 +1686,15 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 				}
 
 				// Kafka under-replicated partitions may happen rarely
-				   if s.rng.Float64() < 0.005*s.stateKafkaURPMult {
-					   n := int(5 * s.stateKafkaURPMult)
-					   if n < 1 {
-						   n = 1
-					   }
-					   delta := int64(float64(s.rng.Intn(n)+1) * s.stateKafkaURPMult)
-					   s.kafkaUnderReplicated.Add(ctx, delta)
-					   s.stateKafkaURP += delta
-				   }
+				if s.rng.Float64() < 0.005*s.stateKafkaURPMult {
+					n := int(5 * s.stateKafkaURPMult)
+					if n < 1 {
+						n = 1
+					}
+					delta := int64(float64(s.rng.Intn(n)+1) * s.stateKafkaURPMult)
+					s.kafkaUnderReplicated.Add(ctx, delta)
+					s.stateKafkaURP += delta
+				}
 
 				// Node exporter periodic counters
 				{
@@ -1716,18 +1716,18 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 					s.stateNodeNetworkLatency = nextNet
 
 					// packet drops: when scenario multiplier > 1, emit extra packet drops
-					   if s.stateNetworkDropMult > 1.0 {
-						   n := 1 + int(s.stateNetworkDropMult)
-						   if n < 1 {
-							   n = 1
-						   }
-						   addDrops := int64(s.rng.Intn(n))
-						   if addDrops > 0 {
-							   s.nodeNetworkPacketDrops.Add(ctx, addDrops)
-							   // also surface higher-level errors in messaging layers
-							   s.kafkaRequestErrors.Add(ctx, addDrops)
-						   }
-					   }
+					if s.stateNetworkDropMult > 1.0 {
+						n := 1 + int(s.stateNetworkDropMult)
+						if n < 1 {
+							n = 1
+						}
+						addDrops := int64(s.rng.Intn(n))
+						if addDrops > 0 {
+							s.nodeNetworkPacketDrops.Add(ctx, addDrops)
+							// also surface higher-level errors in messaging layers
+							s.kafkaRequestErrors.Add(ctx, addDrops)
+						}
+					}
 				}
 
 				// Kafka request rate & bytes-in/second counters (incremental)
@@ -1738,11 +1738,11 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 				// when scenario indicates disk problems for kafka, emit additional request errors and ISR noise
 				if s.stateKafkaErrorMult > 1.0 {
 					// add variable number of request errors scaled by multiplier
-					       n := int64(1 + int64(s.stateKafkaErrorMult))
-					       if n < 1 {
-						       n = 1
-					       }
-					       addErrs := int64(1 + s.rng.Int63n(n))
+					n := int64(1 + int64(s.stateKafkaErrorMult))
+					if n < 1 {
+						n = 1
+					}
+					addErrs := int64(1 + s.rng.Int63n(n))
 					s.kafkaRequestErrors.Add(ctx, addErrs)
 					// occasionally emit ISR changes (broker rebalances etc.)
 					if s.rng.Float64() < 0.3*s.stateKafkaErrorMult {
@@ -1884,11 +1884,11 @@ func (s *Simulator) simulateTransaction(ctx context.Context, transactionID strin
 	start := time.Now()
 
 	// Generate transaction details
-	       n := s.maxAmountPaise - s.minAmountPaise + 1
-	       if n < 1 {
-		       n = 1
-	       }
-	       amountPaise := s.minAmountPaise + s.rng.Int63n(n)
+	n := s.maxAmountPaise - s.minAmountPaise + 1
+	if n < 1 {
+		n = 1
+	}
+	amountPaise := s.minAmountPaise + s.rng.Int63n(n)
 	customerID := fmt.Sprintf("cust-%04d", s.rng.Intn(10000))
 	channel := []string{"mobile", "web", "api"}[s.rng.Intn(3)]
 
