@@ -3,6 +3,8 @@ telemetry:
   metric_names:
     redis_memory_used_bytes: "redis_memory_used_bytes"
     redis_evicted_keys_total: "redis_evicted_keys_total"
+    redis_master_repl_offset: "redis_master_repl_offset"
+    redis_slave_repl_offset: "redis_slave_repl_offset"
 
   labels:
     org_ids: ["bank_01", "bank_02", "bank_03"]
@@ -27,3 +29,6 @@ failure:
         - metric: "redis_evicted_keys_total"
           op: "add"
           value: 20
+        - metric: "redis_master_repl_offset"
+          op: "add"
+          value: 1000

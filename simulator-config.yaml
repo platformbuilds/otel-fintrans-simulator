@@ -61,6 +61,8 @@ telemetry:
     redis_keyspace_hits_total: "redis_keyspace_hits_total"
     redis_keyspace_misses_total: "redis_keyspace_misses_total"
     redis_evicted_keys_total: "redis_evicted_keys_total"
+    redis_master_repl_offset: "redis_master_repl_offset"
+    redis_slave_repl_offset: "redis_slave_repl_offset"
 
     # add any extra names you want to override
     additional:

@@ -86,6 +86,20 @@ func TestBackgroundMetrics_noPanic(t *testing.T) {
 	<-ctx.Done()
 }
 
+func TestInitMetrics_replOffsetsRegistered(t *testing.T) {
+	sim := &Simulator{meter: otel.Meter("test"), tracer: otel.Tracer("test")}
+	if err := sim.initMetrics(context.Background()); err != nil {
+		t.Fatalf("initMetrics failed: %v", err)
+	}
+
+	if sim.redisMasterReplOffset == nil {
+		t.Fatalf("redisMasterReplOffset instrument not initialized")
+	}
+	if sim.redisSlaveReplOffset == nil {
+		t.Fatalf("redisSlaveReplOffset instrument not initialized")
+	}
+}
+
 func TestScenarioScheduler_parsing(t *testing.T) {
 	now := time.Now()
 	cfg := FailureConfig{
@@ -208,6 +222,53 @@ func TestScenarioScheduler_networkEffectsApplied(t *testing.T) {
 	}
 	if sim.stateNetworkDropMult == 1.0 {
 		t.Fatalf("expected network drop multiplier to change when scenario active; got %v", sim.stateNetworkDropMult)
+	}
+}
+
+func TestScenarioScheduler_redisReplEffectsApplied(t *testing.T) {
+	now := time.Now()
+	cfg := FailureConfig{
+		Mode: "random",
+		Scenarios: []Scenario{
+			{
+				Name:     "repl_master",
+				Start:    "0s",
+				Duration: "1m",
+				Effects:  []Effect{{Metric: "redis_master_repl_offset", Op: "scale", Value: 3.0}},
+			},
+			{
+				Name:     "repl_slave",
+				Start:    "0s",
+				Duration: "1m",
+				Effects:  []Effect{{Metric: "redis_slave_repl_offset", Op: "scale", Value: 2.5}},
+			},
+		},
+	}
+
+	ss, err := newScenarioScheduler(cfg, now)
+	if err != nil {
+		t.Fatalf("newScenarioScheduler failed: %v", err)
+	}
+
+	sim := &Simulator{tracer: otel.Tracer("test"), meter: otel.Meter("test"), logger: zap.NewNop()}
+	if err := sim.initMetrics(context.Background()); err != nil {
+		t.Fatalf("initMetrics failed: %v", err)
+	}
+
+	sim.scenarioSched = ss
+	sim.dataInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	go sim.startBackgroundMetrics(ctx)
+	<-ctx.Done()
+
+	if sim.stateRedisMasterReplMult == 1.0 {
+		t.Fatalf("expected redis master repl multiplier to change when scenario active; got %v", sim.stateRedisMasterReplMult)
+	}
+	if sim.stateRedisSlaveReplMult == 1.0 {
+		t.Fatalf("expected redis slave repl multiplier to change when scenario active; got %v", sim.stateRedisSlaveReplMult)
 	}
 }
 
