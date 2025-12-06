@@ -221,6 +221,7 @@ func main() {
 		configPath         = flag.String("config", "", "Path to optional simulator YAML configuration file (supports telemetry names, label sets, failure bursts and 'scenarios' for correlated injections)")
 		randSeed           = flag.Int64("rand-seed", 0, "Optional seed for RNG to make runs deterministic")
 		logOutput          = flag.String("log-output", "nop", "Logger output: 'nop' (default) or 'stdout')")
+		metricIntervalStr  = flag.String("signal-time-interval", "15s", "Interval between metric exports (e.g., 15s, 1m)")
 	)
 	flag.Parse()
 
@@ -314,7 +315,13 @@ func main() {
 		log.Printf("Config warning: %s", w)
 	}
 
-	shutdown, err := initOTel(ctx, endpoint, insecure, skipVerify, telemetryOutputs)
+	// parse metric interval for periodic reader
+	metricInterval, err := time.ParseDuration(*metricIntervalStr)
+	if err != nil {
+		log.Fatalf("Invalid signal-time-interval: %v", err)
+	}
+
+	shutdown, err := initOTel(ctx, endpoint, insecure, skipVerify, telemetryOutputs, metricInterval)
 	if err != nil {
 		log.Fatalf("Failed to initialize OpenTelemetry: %v", err)
 	}
@@ -400,7 +407,7 @@ func main() {
 	log.Println("Simulation completed")
 }
 
-func initOTel(ctx context.Context, endpoint string, insecureConn bool, skipVerify bool, outputs string) (func(context.Context) error, error) {
+func initOTel(ctx context.Context, endpoint string, insecureConn bool, skipVerify bool, outputs string, metricInterval time.Duration) (func(context.Context) error, error) {
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName("fintrans-simulator"),
@@ -515,7 +522,7 @@ func initOTel(ctx context.Context, endpoint string, insecureConn bool, skipVerif
 			if err != nil {
 				return nil, fmt.Errorf("failed to create metric exporter: %w", err)
 			}
-			metricReaders = append(metricReaders, sdkmetric.NewPeriodicReader(metricExporter))
+			metricReaders = append(metricReaders, sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(metricInterval)))
 		} else {
 			metricHTTPOpts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(epHost)}
 			if insecureConn {
@@ -529,7 +536,7 @@ func initOTel(ctx context.Context, endpoint string, insecureConn bool, skipVerif
 			if err != nil {
 				return nil, fmt.Errorf("failed to create HTTP metric exporter: %w", err)
 			}
-			metricReaders = append(metricReaders, sdkmetric.NewPeriodicReader(metricExporter))
+			metricReaders = append(metricReaders, sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(metricInterval)))
 		}
 	}
 
@@ -540,7 +547,7 @@ func initOTel(ctx context.Context, endpoint string, insecureConn bool, skipVerif
 		if err != nil {
 			return nil, fmt.Errorf("failed to create stdout metric exporter: %w", err)
 		}
-		metricReaders = append(metricReaders, sdkmetric.NewPeriodicReader(smExporter))
+		metricReaders = append(metricReaders, sdkmetric.NewPeriodicReader(smExporter, sdkmetric.WithInterval(metricInterval)))
 	}
 
 	// Build options for meter provider so we can register multiple readers
@@ -1447,6 +1454,28 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 								case "ramp":
 									s.stateRedisMemoryMult += eff.Step
 								}
+							case "redis_master_repl_offset":
+								switch eff.Op {
+								case "scale":
+									s.stateRedisMasterReplMult *= eff.Value
+								case "add":
+									s.stateRedisMasterReplMult += eff.Value
+								case "set":
+									s.stateRedisMasterReplMult = eff.Value
+								case "ramp":
+									s.stateRedisMasterReplMult += eff.Step
+								}
+							case "redis_slave_repl_offset":
+								switch eff.Op {
+								case "scale":
+									s.stateRedisSlaveReplMult *= eff.Value
+								case "add":
+									s.stateRedisSlaveReplMult += eff.Value
+								case "set":
+									s.stateRedisSlaveReplMult = eff.Value
+								case "ramp":
+									s.stateRedisSlaveReplMult += eff.Step
+								}
 							case "kafka_urp", "kafka_controller_UnderReplicatedPartitions":
 								switch eff.Op {
 								case "scale":
@@ -1548,8 +1577,8 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 				if s.rng.Float64() < 0.01 {                                   // rare long pause
 					gcAdd += s.rng.Float64() * 0.5
 				}
-				s.jvmGCPauseSecondsSum.Add(ctx, gcAdd)
-				s.jvmGCPauseSecondsCount.Add(ctx, 1)
+				s.safeAddFloat64Counter(s.jvmGCPauseSecondsSum, ctx, gcAdd)
+				s.safeAddInt64Counter(s.jvmGCPauseSecondsCount, ctx, 1)
 
 				// Tomcat thread pool
 				{
@@ -1635,7 +1664,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 					if next > s.stateRedisMax {
 						next = s.stateRedisMax
 						// start evictions when overflow
-						s.redisEvictedKeys.Add(ctx, 1)
+						s.safeAddInt64Counter(s.redisEvictedKeys, ctx, 1)
 					}
 					if next != s.stateRedisUsed {
 						s.redisMemoryUsed.Add(ctx, next-s.stateRedisUsed)
@@ -1698,8 +1727,8 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 
 				// Node exporter periodic counters
 				{
-					s.nodeDiskIOTimeSeconds.Add(ctx, s.rng.Float64()*0.1)
-					s.nodeContextSwitches.Add(ctx, s.rng.Float64()*10)
+					s.safeAddFloat64Counter(s.nodeDiskIOTimeSeconds, ctx, s.rng.Float64()*0.1)
+					s.safeAddFloat64Counter(s.nodeContextSwitches, ctx, s.rng.Float64()*10)
 
 					// small random walk for network latency (ms) scaled by scenario multiplier
 					netDelta := (s.rng.Float64() - 0.5) * 2.0 * s.stateNetworkLatencyMult
@@ -1723,9 +1752,9 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						}
 						addDrops := int64(s.rng.Intn(n))
 						if addDrops > 0 {
-							s.nodeNetworkPacketDrops.Add(ctx, addDrops)
+							s.safeAddInt64Counter(s.nodeNetworkPacketDrops, ctx, addDrops)
 							// also surface higher-level errors in messaging layers
-							s.kafkaRequestErrors.Add(ctx, addDrops)
+							s.safeAddInt64Counter(s.kafkaRequestErrors, ctx, addDrops)
 						}
 					}
 				}
@@ -1733,8 +1762,8 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 				// Kafka request rate & bytes-in/second counters (incremental)
 				// apply kafka requests multiplier to simulate throughput changes (mixed signals)
 				reqVal := (50 + s.rng.Float64()*200) * s.stateKafkaReqsMult
-				s.kafkaRequestsPerSec.Add(ctx, reqVal)
-				s.kafkaBytesInPerSec.Add(ctx, 1024+s.rng.Float64()*10*1024)
+				s.safeAddFloat64Counter(s.kafkaRequestsPerSec, ctx, reqVal)
+				s.safeAddFloat64Counter(s.kafkaBytesInPerSec, ctx, 1024+s.rng.Float64()*10*1024)
 				// when scenario indicates disk problems for kafka, emit additional request errors and ISR noise
 				if s.stateKafkaErrorMult > 1.0 {
 					// add variable number of request errors scaled by multiplier
@@ -1743,10 +1772,10 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						n = 1
 					}
 					addErrs := int64(1 + s.rng.Int63n(n))
-					s.kafkaRequestErrors.Add(ctx, addErrs)
+					s.safeAddInt64Counter(s.kafkaRequestErrors, ctx, addErrs)
 					// occasionally emit ISR changes (broker rebalances etc.)
 					if s.rng.Float64() < 0.3*s.stateKafkaErrorMult {
-						s.kafkaISRChanges.Add(ctx, s.rng.Float64()*s.stateKafkaErrorMult)
+						s.safeAddFloat64Counter(s.kafkaISRChanges, ctx, s.rng.Float64()*s.stateKafkaErrorMult)
 					}
 				}
 			}
@@ -1965,7 +1994,7 @@ func (s *Simulator) simulateTransaction(ctx context.Context, transactionID strin
 			attribute.String("final_status", "error"),
 			attribute.String("error_type", "auth_failure"),
 		)
-		s.transactionsFailedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("service_name", apiGatewayName)))
+		s.safeAddInt64Counter(s.transactionsFailedTotal, ctx, 1, attribute.String("service_name", apiGatewayName))
 		s.logger.Error("Auth validation failed",
 			zap.String("transaction_id", transactionID),
 			zap.String("service_name", apiGatewayName),
@@ -2018,12 +2047,12 @@ func (s *Simulator) simulateTransaction(ctx context.Context, transactionID strin
 		attrs = append(attrs, attribute.String("transaction_type", txType))
 	}
 
-	s.transactionsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
-	s.transactionAmountSum.Add(ctx, result.AmountPaise, metric.WithAttributes(append(attrs, attribute.String("currency", currencyINR))...))
-	s.transactionAmountCount.Add(ctx, 1, metric.WithAttributes(append(attrs, attribute.String("currency", currencyINR))...))
+	s.safeAddInt64Counter(s.transactionsTotal, ctx, 1, attrs...)
+	s.safeAddInt64Counter(s.transactionAmountSum, ctx, result.AmountPaise, append(attrs, attribute.String("currency", currencyINR))...)
+	s.safeAddInt64Counter(s.transactionAmountCount, ctx, 1, append(attrs, attribute.String("currency", currencyINR))...)
 
 	if result.FinalStatus == "error" {
-		s.transactionsFailedTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+		s.safeAddInt64Counter(s.transactionsFailedTotal, ctx, 1, attrs...)
 	}
 
 	duration := time.Since(start).Seconds() * s.stateDbLatencyMult
@@ -2181,7 +2210,7 @@ func (s *Simulator) simulateCassandraOp(ctx context.Context, transactionID, oper
 	time.Sleep(time.Duration(20+s.rng.Intn(30)) * time.Millisecond)
 	duration := time.Since(start).Seconds() * s.stateDbLatencyMult
 
-	s.dbOpsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("db_system", "cassandra")))
+	s.safeAddInt64Counter(s.dbOpsTotal, ctx, 1, attribute.String("db_system", "cassandra"))
 	s.dbLatency.Record(ctx, duration, metric.WithAttributes(attribute.String("db_system", "cassandra")))
 	s.recordDBLatencyBuckets(ctx, duration, attribute.String("db_system", "cassandra"))
 
@@ -2222,8 +2251,8 @@ func (s *Simulator) simulateKeyDBOp(ctx context.Context, transactionID, operatio
 		if s.stateKeydbFailMult > 1.0 {
 			reason = "keydb_memory_corruption"
 			// also emit some redis/keydb related noise so metrics reflect memory fault
-			s.redisKeyspaceMisses.Add(ctx, 1)
-			s.redisEvictedKeys.Add(ctx, 1)
+			s.safeAddInt64Counter(s.redisKeyspaceMisses, ctx, 1)
+			s.safeAddInt64Counter(s.redisEvictedKeys, ctx, 1)
 		}
 		s.logger.Error("KeyDB operation failed",
 			zap.String("transaction_id", transactionID),
@@ -2238,7 +2267,7 @@ func (s *Simulator) simulateKeyDBOp(ctx context.Context, transactionID, operatio
 	time.Sleep(time.Duration(5+s.rng.Intn(15)) * time.Millisecond)
 	duration := time.Since(start).Seconds() * s.stateDbLatencyMult
 
-	s.dbOpsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("db_system", "valkey")))
+	s.safeAddInt64Counter(s.dbOpsTotal, ctx, 1, attribute.String("db_system", "valkey"))
 	s.dbLatency.Record(ctx, duration, metric.WithAttributes(attribute.String("db_system", "valkey")))
 	s.recordDBLatencyBuckets(ctx, duration, attribute.String("db_system", "valkey"))
 
@@ -2289,7 +2318,7 @@ func (s *Simulator) simulateKafkaProduce(ctx context.Context, transactionID stri
 	if combinedFail {
 		span.SetStatus(codes.Error, "Kafka produce failed")
 		// increment error counter when scenario is causing errors
-		s.kafkaRequestErrors.Add(ctx, 1)
+		s.safeAddInt64Counter(s.kafkaRequestErrors, ctx, 1)
 		return fmt.Errorf("kafka produce failed")
 	}
 
@@ -2297,11 +2326,7 @@ func (s *Simulator) simulateKafkaProduce(ctx context.Context, transactionID stri
 	time.Sleep(time.Duration(10+s.rng.Intn(20)) * time.Millisecond)
 	duration := time.Since(start).Seconds() * s.stateDbLatencyMult
 
-	s.kafkaProduceTotal.Add(ctx, 1,
-		metric.WithAttributes(
-			attribute.String("service_name", kpName),
-			attribute.String("messaging.destination", "transaction-log"),
-		))
+	s.safeAddInt64Counter(s.kafkaProduceTotal, ctx, 1, attribute.String("service_name", kpName), attribute.String("messaging.destination", "transaction-log"))
 	s.kafkaProduceLatency.Record(ctx, duration,
 		metric.WithAttributes(
 			attribute.String("service_name", kpName),
@@ -2352,7 +2377,7 @@ func (s *Simulator) simulateKafkaConsumer(ctx context.Context, transactionID str
 
 	if combinedFail {
 		span.SetStatus(codes.Error, "Kafka consume failed")
-		s.kafkaRequestErrors.Add(ctx, 1)
+		s.safeAddInt64Counter(s.kafkaRequestErrors, ctx, 1)
 		return
 	}
 
@@ -2371,11 +2396,7 @@ func (s *Simulator) simulateKafkaConsumer(ctx context.Context, transactionID str
 	}
 
 	duration := time.Since(start).Seconds()
-	s.kafkaConsumeTotal.Add(ctx, 1,
-		metric.WithAttributes(
-			attribute.String("service_name", kcName),
-			attribute.String("messaging.destination", "transaction-log"),
-		))
+	s.safeAddInt64Counter(s.kafkaConsumeTotal, ctx, 1, attribute.String("service_name", kcName), attribute.String("messaging.destination", "transaction-log"))
 	s.kafkaConsumeLatency.Record(ctx, duration,
 		metric.WithAttributes(
 			attribute.String("service_name", kcName),
@@ -2426,11 +2447,7 @@ func (s *Simulator) simulateAPIGatewayKafkaConsumer(ctx context.Context, transac
 	}
 
 	duration := time.Since(start).Seconds()
-	s.kafkaConsumeTotal.Add(ctx, 1,
-		metric.WithAttributes(
-			attribute.String("service_name", agName),
-			attribute.String("messaging.destination", "transaction-log"),
-		))
+	s.safeAddInt64Counter(s.kafkaConsumeTotal, ctx, 1, attribute.String("service_name", agName), attribute.String("messaging.destination", "transaction-log"))
 	s.kafkaConsumeLatency.Record(ctx, duration,
 		metric.WithAttributes(
 			attribute.String("service_name", agName),
@@ -2468,7 +2485,7 @@ func (s *Simulator) simulateAPIGatewayCassandraWrite(ctx context.Context, transa
 	time.Sleep(time.Duration(20+s.rng.Intn(30)) * time.Millisecond)
 	duration := time.Since(start).Seconds()
 
-	s.dbOpsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("db_system", "cassandra")))
+	s.safeAddInt64Counter(s.dbOpsTotal, ctx, 1, attribute.String("db_system", "cassandra"))
 	s.dbLatency.Record(ctx, duration, metric.WithAttributes(attribute.String("db_system", "cassandra")))
 	s.recordDBLatencyBuckets(ctx, duration, attribute.String("db_system", "cassandra"))
 
@@ -2486,16 +2503,16 @@ func (s *Simulator) recordTransactionLatencyBuckets(ctx context.Context, v float
 			le := fmt.Sprintf("%g", b)
 			// combine attrs with le attribute
 			combined := append(attrs, attribute.String("le", le))
-			s.transactionLatencyBucket.Add(ctx, 1.0, metric.WithAttributes(combined...))
+			s.safeAddFloat64Counter(s.transactionLatencyBucket, ctx, 1.0, combined...)
 		}
 	}
 	// +Inf bucket always receives the count
 	combinedInf := append(attrs, attribute.String("le", "+Inf"))
-	s.transactionLatencyBucket.Add(ctx, 1.0, metric.WithAttributes(combinedInf...))
+	s.safeAddFloat64Counter(s.transactionLatencyBucket, ctx, 1.0, combinedInf...)
 
 	// sum and count
-	s.transactionLatencySum.Add(ctx, v, metric.WithAttributes(attrs...))
-	s.transactionLatencyCount.Add(ctx, 1, metric.WithAttributes(attrs...))
+	s.safeAddFloat64Counter(s.transactionLatencySum, ctx, v, attrs...)
+	s.safeAddInt64Counter(s.transactionLatencyCount, ctx, 1, attrs...)
 }
 
 // recordDBLatencyBuckets updates DB histogram counters similarly
@@ -2504,14 +2521,39 @@ func (s *Simulator) recordDBLatencyBuckets(ctx context.Context, v float64, attrs
 		if v <= b {
 			le := fmt.Sprintf("%g", b)
 			combined := append(attrs, attribute.String("le", le))
-			s.dbLatencyBucket.Add(ctx, 1.0, metric.WithAttributes(combined...))
+			s.safeAddFloat64Counter(s.dbLatencyBucket, ctx, 1.0, combined...)
 		}
 	}
 	combinedInf := append(attrs, attribute.String("le", "+Inf"))
-	s.dbLatencyBucket.Add(ctx, 1.0, metric.WithAttributes(combinedInf...))
+	s.safeAddFloat64Counter(s.dbLatencyBucket, ctx, 1.0, combinedInf...)
 
-	s.dbLatencySum.Add(ctx, v, metric.WithAttributes(attrs...))
-	s.dbLatencyCount.Add(ctx, 1, metric.WithAttributes(attrs...))
+	s.safeAddFloat64Counter(s.dbLatencySum, ctx, v, attrs...)
+	s.safeAddInt64Counter(s.dbLatencyCount, ctx, 1, attrs...)
+}
+
+// safeAdd helpers ensure we never add negative values to cumulative counters.
+// Counters must only be incremented with non-negative values; helpers also
+// accept optional attributes to keep call sites concise.
+func (s *Simulator) safeAddInt64Counter(c metric.Int64Counter, ctx context.Context, v int64, attrs ...attribute.KeyValue) {
+	if v < 0 {
+		v = 0
+	}
+	if len(attrs) > 0 {
+		c.Add(ctx, v, metric.WithAttributes(attrs...))
+	} else {
+		c.Add(ctx, v)
+	}
+}
+
+func (s *Simulator) safeAddFloat64Counter(c metric.Float64Counter, ctx context.Context, v float64, attrs ...attribute.KeyValue) {
+	if v < 0 {
+		v = 0
+	}
+	if len(attrs) > 0 {
+		c.Add(ctx, v, metric.WithAttributes(attrs...))
+	} else {
+		c.Add(ctx, v)
+	}
 }
 
 // scenarioScheduler implements runtime schedule for configured scenarios.

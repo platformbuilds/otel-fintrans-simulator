@@ -44,6 +44,28 @@ TRANSACTION_RATE=100 ./bin/otel-fintrans-simulator
 ./bin/otel-fintrans-simulator --log-output stdout
 ```
 
+### Metric export interval
+
+You can control how often the simulator collects and exports metrics to the configured exporters (OTLP/stdout) with the `--signal-time-interval` flag. The value is a Go duration string (for example `15s`, `30s`, `1m`). The default is `15s`.
+
+Examples:
+
+```bash
+# default (15s)
+./bin/otel-fintrans-simulator --signal-time-interval=15s
+
+# set to 30 seconds
+./bin/otel-fintrans-simulator --signal-time-interval=30s
+
+# set to 1 minute
+./bin/otel-fintrans-simulator --signal-time-interval=1m
+
+# using `go run` with a custom interval
+go run . --signal-time-interval=15s
+```
+
+Note: extremely short intervals may increase CPU/network load; pick an interval appropriate for your testing scenario.
+
 ### Configuration
 
 Environment variables:
