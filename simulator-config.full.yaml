@@ -216,4 +216,14 @@ failure:
           op: "scale"
           value: 5.0
 
+# Runtime defaults (suggested): these fields are read by helper scripts
+# and examples in this repo; they are not strictly required by the CLI but
+# help quick-start denser KPI generation for rate() testing.
+runtime:
+  transactions: 300
+  time_window: 5m
+  data_interval: 10s
+  signal_time_interval: 10s
+  concurrency: 10
+
 # End fully-loaded config

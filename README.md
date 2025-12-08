@@ -64,6 +64,24 @@ Examples:
 go run . --signal-time-interval=15s
 ```
 
+For testing dense, continuous time series (recommended when you want good rate() and histogram results):
+
+```bash
+# Example: 300 transactions spread over 5 minutes with 10s data and export intervals
+./bin/otel-fintrans-simulator \
+  --transactions=300 \
+  --time-window=5m \
+  --data-interval=10s \
+  --signal-time-interval=10s \
+  --concurrency=10 \
+  --failure-mode=mixed \
+  --failure-rate=0.2 \
+  --config=simulator-config.yaml \
+  --log-output=stdout
+```
+
+This produces frequent, evenly spaced metric points for 5 minutes so PromQL functions like rate(...[1m]) and histogram_quantile(...) have dense data to operate on.
+
 Note: extremely short intervals may increase CPU/network load; pick an interval appropriate for your testing scenario.
 
 ### Configuration

@@ -217,4 +217,20 @@ failure:
           op: "scale"
           value: 5.0
 
+# Runtime defaults (suggested): these fields are read by helper scripts
+# and examples in this repository (not required by the simulator CLI which
+# also supports overriding via flags). These defaults make KPIs denser
+# so you can compute rate() and histograms during short tests.
+runtime:
+  # total transactions to emit by default when running the example scripts
+  transactions: 300
+  # spread generated transactions over this time window (0s = instant)
+  time_window: 5m
+  # simulator-level interval between data points (used by background ticker)
+  data_interval: 10s
+  # exporter / periodic reader interval used to send metrics to exporters
+  signal_time_interval: 10s
+  # concurrency (parallel transactions per interval)
+  concurrency: 10
+
 # End fully-loaded config

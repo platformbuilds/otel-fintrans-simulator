@@ -33,5 +33,18 @@ if [[ ! -x "${BIN}" ]]; then
 fi
 
 echo "Running simulator with config: ${CFG_PATH}"
-# default: run with log-output stdout for local debugging
-TRANSACTION_RATE=${TRANSACTION_RATE:-50} "$BIN" --config "${CFG_PATH}" --log-output stdout --rand-seed 12345
+# runtime/default overrides for denser KPI generation — configurable via env vars
+# TRANSACTIONS, TIME_WINDOW, DATA_INTERVAL, SIGNAL_TIME_INTERVAL, CONCURRENCY
+TRANSACTIONS=${TRANSACTIONS:-300}
+TIME_WINDOW=${TIME_WINDOW:-5m}
+DATA_INTERVAL=${DATA_INTERVAL:-10s}
+SIGNAL_TIME_INTERVAL=${SIGNAL_TIME_INTERVAL:-10s}
+CONCURRENCY=${CONCURRENCY:-10}
+
+# default: run with log-output stdout for local debugging and tighter intervals
+"$BIN" --config "${CFG_PATH}" --log-output stdout --rand-seed 12345 \
+  --transactions="${TRANSACTIONS}" \
+  --time-window="${TIME_WINDOW}" \
+  --data-interval="${DATA_INTERVAL}" \
+  --signal-time-interval="${SIGNAL_TIME_INTERVAL}" \
+  --concurrency="${CONCURRENCY}"
