@@ -143,6 +143,10 @@ type Simulator struct {
 	nodeNetworkPacketDrops metric.Int64Counter
 	nodeContextSwitches    metric.Float64Counter
 
+	// Cassandra / DB extras (scenario-driven signals)
+	cassandraDiskPressure      metric.Float64UpDownCounter
+	cassandraCompactionPending metric.Int64UpDownCounter
+
 	// internal state for gauge-like values (kept so we can use UpDown counters)
 	stateLock                sync.Mutex
 	stateJvmUsed             float64
@@ -170,6 +174,9 @@ type Simulator struct {
 	stateFsAvail             float64
 	stateFsSize              float64
 	stateNodeNetworkLatency  float64
+	// Cassandra state
+	stateCassandraDiskPressure      float64
+	stateCassandraCompactionPending int64
 
 	// scenario scheduler
 	scenarioSched *scenarioScheduler
@@ -191,8 +198,9 @@ type Simulator struct {
 	stateNetworkLatencyMult float64
 	stateNetworkDropMult    float64
 	// runtime configuration
-	telemCfg     TelemetryConfig
-	failureSched *failureScheduler
+	telemCfg       TelemetryConfig
+	metricRegistry *MetricRegistry
+	failureSched   *failureScheduler
 	// histogram bucket boundaries (predefined)
 	transactionLatencyBuckets []float64
 	dbLatencyBuckets          []float64
@@ -683,83 +691,38 @@ func validateTelemetryConfig(endpoint string, insecure bool, skipVerify bool) []
 func (s *Simulator) initMetrics(ctx context.Context) error {
 	var err error
 
+	// initialize dynamic registry early so we can register both config-driven
+	// and built-in metrics in one pass
+	s.metricRegistry = NewMetricRegistry(s.meter)
+
 	txTotalName := "transactions_total"
 	if s.telemCfg.MetricNames.TransactionsTotal != "" {
 		txTotalName = s.telemCfg.MetricNames.TransactionsTotal
-	}
-	s.transactionsTotal, err = s.meter.Int64Counter(txTotalName,
-		metric.WithDescription("Total number of transactions"))
-	if err != nil {
-		return err
 	}
 
 	txFailedName := "transactions_failed_total"
 	if s.telemCfg.MetricNames.TransactionsFailed != "" {
 		txFailedName = s.telemCfg.MetricNames.TransactionsFailed
 	}
-	s.transactionsFailedTotal, err = s.meter.Int64Counter(txFailedName,
-		metric.WithDescription("Total number of failed transactions"))
-	if err != nil {
-		return err
-	}
 
 	dbOpsName := "db_ops_total"
 	if s.telemCfg.MetricNames.DBOpsTotal != "" {
 		dbOpsName = s.telemCfg.MetricNames.DBOpsTotal
-	}
-	s.dbOpsTotal, err = s.meter.Int64Counter(dbOpsName,
-		metric.WithDescription("Total database operations"))
-	if err != nil {
-		return err
 	}
 
 	kafkaProduceName := "kafka_produce_total"
 	if s.telemCfg.MetricNames.KafkaProduceTotal != "" {
 		kafkaProduceName = s.telemCfg.MetricNames.KafkaProduceTotal
 	}
-	s.kafkaProduceTotal, err = s.meter.Int64Counter(kafkaProduceName,
-		metric.WithDescription("Total Kafka produce operations"))
-	if err != nil {
-		return err
-	}
 
 	kafkaConsumeName := "kafka_consume_total"
 	if s.telemCfg.MetricNames.KafkaConsumeTotal != "" {
 		kafkaConsumeName = s.telemCfg.MetricNames.KafkaConsumeTotal
 	}
-	s.kafkaConsumeTotal, err = s.meter.Int64Counter(kafkaConsumeName,
-		metric.WithDescription("Total Kafka consume operations"))
-	if err != nil {
-		return err
-	}
 
 	txLatencyName := "transaction_latency_seconds"
 	if s.telemCfg.MetricNames.TransactionLatency != "" {
 		txLatencyName = s.telemCfg.MetricNames.TransactionLatency
-	}
-	s.transactionLatency, err = s.meter.Float64Histogram(txLatencyName,
-		metric.WithDescription("Transaction processing latency"))
-	if err != nil {
-		return err
-	}
-	// transaction histogram counters for PromQL-style buckets
-	txBucketName := txLatencyName + "_bucket"
-	s.transactionLatencyBucket, err = s.meter.Float64Counter(txBucketName,
-		metric.WithDescription("Transaction latency buckets (cumulative)"))
-	if err != nil {
-		return err
-	}
-	txSumName := txLatencyName + "_sum"
-	s.transactionLatencySum, err = s.meter.Float64Counter(txSumName,
-		metric.WithDescription("Transaction latency sum (seconds)"))
-	if err != nil {
-		return err
-	}
-	txCountName := txLatencyName + "_count"
-	s.transactionLatencyCount, err = s.meter.Int64Counter(txCountName,
-		metric.WithDescription("Transaction latency count"))
-	if err != nil {
-		return err
 	}
 	// default buckets
 	s.transactionLatencyBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10}
@@ -768,30 +731,6 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 	if s.telemCfg.MetricNames.DBLatency != "" {
 		dbLatencyName = s.telemCfg.MetricNames.DBLatency
 	}
-	s.dbLatency, err = s.meter.Float64Histogram(dbLatencyName,
-		metric.WithDescription("Database operation latency"))
-	if err != nil {
-		return err
-	}
-	// db histogram counters
-	dBucketName := dbLatencyName + "_bucket"
-	s.dbLatencyBucket, err = s.meter.Float64Counter(dBucketName,
-		metric.WithDescription("DB latency buckets (cumulative)"))
-	if err != nil {
-		return err
-	}
-	dSumName := dbLatencyName + "_sum"
-	s.dbLatencySum, err = s.meter.Float64Counter(dSumName,
-		metric.WithDescription("DB latency sum (seconds)"))
-	if err != nil {
-		return err
-	}
-	dCountName := dbLatencyName + "_count"
-	s.dbLatencyCount, err = s.meter.Int64Counter(dCountName,
-		metric.WithDescription("DB latency count"))
-	if err != nil {
-		return err
-	}
 	// default db buckets (similar but fewer)
 	s.dbLatencyBuckets = []float64{0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2}
 
@@ -799,36 +738,15 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 	if s.telemCfg.MetricNames.TransactionAmountSum != "" {
 		txAmountSumName = s.telemCfg.MetricNames.TransactionAmountSum
 	}
-	s.transactionAmountSum, err = s.meter.Int64Counter(txAmountSumName,
-		metric.WithDescription("Sum of transaction amounts in paise"))
-	if err != nil {
-		return err
-	}
 
 	txAmountCountName := "transaction_amount_paisa_count"
 	if s.telemCfg.MetricNames.TransactionAmountCount != "" {
 		txAmountCountName = s.telemCfg.MetricNames.TransactionAmountCount
 	}
-	s.transactionAmountCount, err = s.meter.Int64Counter(txAmountCountName,
-		metric.WithDescription("Count of transactions for amount metrics"))
-	if err != nil {
-		return err
-	}
 
 	// Kafka latency metrics (separate from DB latency)
 	kafkaProduceLatencyName := "kafka_produce_latency_seconds"
-	s.kafkaProduceLatency, err = s.meter.Float64Histogram(kafkaProduceLatencyName,
-		metric.WithDescription("Latency for kafka produce operations"))
-	if err != nil {
-		return err
-	}
-
 	kafkaConsumeLatencyName := "kafka_consume_latency_seconds"
-	s.kafkaConsumeLatency, err = s.meter.Float64Histogram(kafkaConsumeLatencyName,
-		metric.WithDescription("Latency for kafka consume operations"))
-	if err != nil {
-		return err
-	}
 
 	// --- additional instrument initialization ---
 	// JVM
@@ -838,11 +756,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			jvmUsedName = n
 		}
 	}
-	s.jvmMemoryUsed, err = s.meter.Float64UpDownCounter(jvmUsedName,
-		metric.WithDescription("JVM heap memory used in bytes"))
-	if err != nil {
-		return err
-	}
+	_ = jvmUsedName
 
 	jvmMaxName := "jvm_memory_max_bytes"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -850,11 +764,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			jvmMaxName = n
 		}
 	}
-	s.jvmMemoryMax, err = s.meter.Float64UpDownCounter(jvmMaxName,
-		metric.WithDescription("JVM heap memory max in bytes"))
-	if err != nil {
-		return err
-	}
+	_ = jvmMaxName
 
 	jvmGCSumName := "jvm_gc_pause_seconds_sum"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -862,11 +772,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			jvmGCSumName = n
 		}
 	}
-	s.jvmGCPauseSecondsSum, err = s.meter.Float64Counter(jvmGCSumName,
-		metric.WithDescription("Total seconds spent in JVM GC"))
-	if err != nil {
-		return err
-	}
+	_ = jvmGCSumName
 
 	jvmGCCountName := "jvm_gc_pause_seconds_count"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -874,11 +780,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			jvmGCCountName = n
 		}
 	}
-	s.jvmGCPauseSecondsCount, err = s.meter.Int64Counter(jvmGCCountName,
-		metric.WithDescription("Total number of JVM garbage collections"))
-	if err != nil {
-		return err
-	}
+	_ = jvmGCCountName
 
 	// Tomcat
 	tomcatBusyName := "tomcat_threads_busy_threads"
@@ -887,11 +789,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			tomcatBusyName = n
 		}
 	}
-	s.tomcatThreadsBusy, err = s.meter.Int64UpDownCounter(tomcatBusyName,
-		metric.WithDescription("Number of busy tomcat threads"))
-	if err != nil {
-		return err
-	}
+	_ = tomcatBusyName
 
 	tomcatMaxName := "tomcat_threads_config_max_threads"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -899,11 +797,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			tomcatMaxName = n
 		}
 	}
-	s.tomcatThreadsMax, err = s.meter.Int64UpDownCounter(tomcatMaxName,
-		metric.WithDescription("Configured number of tomcat max threads"))
-	if err != nil {
-		return err
-	}
+	_ = tomcatMaxName
 
 	tomcatQueueName := "tomcat_threads_queue_seconds"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -911,11 +805,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			tomcatQueueName = n
 		}
 	}
-	s.tomcatThreadsQueueSec, err = s.meter.Float64UpDownCounter(tomcatQueueName,
-		metric.WithDescription("Queue seconds spent waiting for Tomcat threads"))
-	if err != nil {
-		return err
-	}
+	_ = tomcatQueueName
 
 	// Process / runtime
 	cpuName := "process_cpu_usage"
@@ -924,11 +814,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			cpuName = n
 		}
 	}
-	s.processCPUUsage, err = s.meter.Float64UpDownCounter(cpuName,
-		metric.WithDescription("CPU usage (percent) for process"))
-	if err != nil {
-		return err
-	}
+	_ = cpuName
 
 	uptimeName := "process_uptime_seconds"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -936,11 +822,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			uptimeName = n
 		}
 	}
-	s.processUptimeSeconds, err = s.meter.Float64UpDownCounter(uptimeName,
-		metric.WithDescription("Process uptime in seconds"))
-	if err != nil {
-		return err
-	}
+	_ = uptimeName
 
 	filesOpenName := "process_files_open_files"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -948,11 +830,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			filesOpenName = n
 		}
 	}
-	s.processFilesOpen, err = s.meter.Int64UpDownCounter(filesOpenName,
-		metric.WithDescription("Process open file descriptors"))
-	if err != nil {
-		return err
-	}
+	_ = filesOpenName
 
 	filesMaxName := "process_files_max_files"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -960,11 +838,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			filesMaxName = n
 		}
 	}
-	s.processFilesMax, err = s.meter.Int64UpDownCounter(filesMaxName,
-		metric.WithDescription("Process max file descriptors"))
-	if err != nil {
-		return err
-	}
+	_ = filesMaxName
 
 	// Hikari
 	hikariActiveName := "hikaricp_connections_active"
@@ -973,11 +847,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			hikariActiveName = n
 		}
 	}
-	s.hikariConnectionsActive, err = s.meter.Int64UpDownCounter(hikariActiveName,
-		metric.WithDescription("Hikari active connections"))
-	if err != nil {
-		return err
-	}
+	_ = hikariActiveName
 
 	hikariMaxName := "hikaricp_connections_max"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -985,11 +855,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			hikariMaxName = n
 		}
 	}
-	s.hikariConnectionsMax, err = s.meter.Int64UpDownCounter(hikariMaxName,
-		metric.WithDescription("Hikari max connections"))
-	if err != nil {
-		return err
-	}
+	_ = hikariMaxName
 
 	// Redis / KeyDB
 	redisUsedName := "redis_memory_used_bytes"
@@ -998,11 +864,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			redisUsedName = n
 		}
 	}
-	s.redisMemoryUsed, err = s.meter.Float64UpDownCounter(redisUsedName,
-		metric.WithDescription("Redis/KeyDB memory used bytes"))
-	if err != nil {
-		return err
-	}
+	_ = redisUsedName
 
 	redisMaxName := "redis_memory_max_bytes"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1010,11 +872,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			redisMaxName = n
 		}
 	}
-	s.redisMemoryMax, err = s.meter.Float64UpDownCounter(redisMaxName,
-		metric.WithDescription("Redis/KeyDB memory max bytes"))
-	if err != nil {
-		return err
-	}
+	_ = redisMaxName
 
 	redisHitsName := "redis_keyspace_hits_total"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1022,11 +880,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			redisHitsName = n
 		}
 	}
-	s.redisKeyspaceHits, err = s.meter.Int64Counter(redisHitsName,
-		metric.WithDescription("Redis keyspace hits"))
-	if err != nil {
-		return err
-	}
+	_ = redisHitsName
 
 	redisMissName := "redis_keyspace_misses_total"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1034,11 +888,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			redisMissName = n
 		}
 	}
-	s.redisKeyspaceMisses, err = s.meter.Int64Counter(redisMissName,
-		metric.WithDescription("Redis keyspace misses"))
-	if err != nil {
-		return err
-	}
+	_ = redisMissName
 
 	redisEvictName := "redis_evicted_keys_total"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1046,11 +896,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			redisEvictName = n
 		}
 	}
-	s.redisEvictedKeys, err = s.meter.Int64Counter(redisEvictName,
-		metric.WithDescription("Redis key evictions"))
-	if err != nil {
-		return err
-	}
+	_ = redisEvictName
 
 	redisClientsName := "redis_connected_clients"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1058,11 +904,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			redisClientsName = n
 		}
 	}
-	s.redisConnectedClients, err = s.meter.Int64UpDownCounter(redisClientsName,
-		metric.WithDescription("Redis connected clients"))
-	if err != nil {
-		return err
-	}
+	_ = redisClientsName
 
 	// Replication offsets (master + slave)
 	masterReplName := "redis_master_repl_offset"
@@ -1071,11 +913,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			masterReplName = n
 		}
 	}
-	s.redisMasterReplOffset, err = s.meter.Int64UpDownCounter(masterReplName,
-		metric.WithDescription("Redis master replication offset"))
-	if err != nil {
-		return err
-	}
+	_ = masterReplName
 
 	slaveReplName := "redis_slave_repl_offset"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1083,11 +921,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			slaveReplName = n
 		}
 	}
-	s.redisSlaveReplOffset, err = s.meter.Int64UpDownCounter(slaveReplName,
-		metric.WithDescription("Redis slave replication offset"))
-	if err != nil {
-		return err
-	}
+	_ = slaveReplName
 
 	// Kafka
 	kafkaURPName := "kafka_controller_UnderReplicatedPartitions"
@@ -1096,11 +930,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			kafkaURPName = n
 		}
 	}
-	s.kafkaUnderReplicated, err = s.meter.Int64UpDownCounter(kafkaURPName,
-		metric.WithDescription("Kafka under replicated partitions"))
-	if err != nil {
-		return err
-	}
+	_ = kafkaURPName
 
 	kafkaReqName := "kafka_network_RequestMetrics_RequestsPerSec"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1108,11 +938,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			kafkaReqName = n
 		}
 	}
-	s.kafkaRequestsPerSec, err = s.meter.Float64Counter(kafkaReqName,
-		metric.WithDescription("Kafka network requests per second (incremental)"))
-	if err != nil {
-		return err
-	}
+	_ = kafkaReqName
 
 	kafkaBytesName := "kafka_server_BrokerTopicMetrics_BytesInPerSec"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1120,11 +946,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			kafkaBytesName = n
 		}
 	}
-	s.kafkaBytesInPerSec, err = s.meter.Float64Counter(kafkaBytesName,
-		metric.WithDescription("Kafka bytes in per second (incremental)"))
-	if err != nil {
-		return err
-	}
+	_ = kafkaBytesName
 
 	kafkaErrName := "kafka_network_RequestMetrics_ErrorsPerSec"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1132,11 +954,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			kafkaErrName = n
 		}
 	}
-	s.kafkaRequestErrors, err = s.meter.Int64Counter(kafkaErrName,
-		metric.WithDescription("Kafka request errors per second"))
-	if err != nil {
-		return err
-	}
+	_ = kafkaErrName
 
 	kafkaISRName := "kafka_controller_IsrShrinksPerSec"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1144,11 +962,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			kafkaISRName = n
 		}
 	}
-	s.kafkaISRChanges, err = s.meter.Float64Counter(kafkaISRName,
-		metric.WithDescription("Kafka ISR changes per second (shrinks+expands)"))
-	if err != nil {
-		return err
-	}
+	_ = kafkaISRName
 
 	// Node exporter
 	nodeLoadName := "node_load1"
@@ -1157,11 +971,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			nodeLoadName = n
 		}
 	}
-	s.nodeLoad1, err = s.meter.Float64UpDownCounter(nodeLoadName,
-		metric.WithDescription("1-minute load average"))
-	if err != nil {
-		return err
-	}
+	_ = nodeLoadName
 
 	nodeMemAvailName := "node_memory_MemAvailable_bytes"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1169,11 +979,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			nodeMemAvailName = n
 		}
 	}
-	s.nodeMemoryAvailable, err = s.meter.Float64UpDownCounter(nodeMemAvailName,
-		metric.WithDescription("Node available memory bytes"))
-	if err != nil {
-		return err
-	}
+	_ = nodeMemAvailName
 
 	nodeMemTotalName := "node_memory_MemTotal_bytes"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1181,11 +987,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			nodeMemTotalName = n
 		}
 	}
-	s.nodeMemoryTotal, err = s.meter.Float64UpDownCounter(nodeMemTotalName,
-		metric.WithDescription("Node total memory bytes"))
-	if err != nil {
-		return err
-	}
+	_ = nodeMemTotalName
 
 	nodeFsAvailName := "node_filesystem_avail_bytes"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1193,11 +995,7 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			nodeFsAvailName = n
 		}
 	}
-	s.nodeFilesystemAvail, err = s.meter.Float64UpDownCounter(nodeFsAvailName,
-		metric.WithDescription("Node filesystem available bytes"))
-	if err != nil {
-		return err
-	}
+	_ = nodeFsAvailName
 
 	nodeFsSizeName := "node_filesystem_size_bytes"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1205,11 +1003,24 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			nodeFsSizeName = n
 		}
 	}
-	s.nodeFilesystemSize, err = s.meter.Float64UpDownCounter(nodeFsSizeName,
-		metric.WithDescription("Node filesystem size bytes"))
-	if err != nil {
-		return err
+	_ = nodeFsSizeName
+
+	// Cassandra-specific signals (scenario-driven)
+	cassandraDiskPressureName := "cassandra_disk_pressure"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[cassandraDiskPressureName]; ok && n != "" {
+			cassandraDiskPressureName = n
+		}
 	}
+	_ = cassandraDiskPressureName
+
+	cassandraCompactionName := "cassandra_compaction_pending_tasks"
+	if s.telemCfg.MetricNames.Additional != nil {
+		if n, ok := s.telemCfg.MetricNames.Additional[cassandraCompactionName]; ok && n != "" {
+			cassandraCompactionName = n
+		}
+	}
+	_ = cassandraCompactionName
 
 	nodeDiskIOName := "node_disk_io_time_seconds_total"
 	if s.telemCfg.MetricNames.Additional != nil {
@@ -1217,29 +1028,20 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			nodeDiskIOName = n
 		}
 	}
-	s.nodeDiskIOTimeSeconds, err = s.meter.Float64Counter(nodeDiskIOName,
-		metric.WithDescription("Node disk io time seconds (cumulative)"))
+	_ = nodeDiskIOName
 
 	// Node network metrics
 	nodeNetLatencyName := "node_network_latency_ms"
 	if n, ok := s.telemCfg.MetricNames.Additional[nodeNetLatencyName]; ok && n != "" {
 		nodeNetLatencyName = n
 	}
-	s.nodeNetworkLatencyMs, err = s.meter.Float64UpDownCounter(nodeNetLatencyName,
-		metric.WithDescription("Node network latency in milliseconds (gauge-like)"))
-	if err != nil {
-		return err
-	}
+	_ = nodeNetLatencyName
 
 	nodePacketDropsName := "node_network_packet_drops_total"
 	if n, ok := s.telemCfg.MetricNames.Additional[nodePacketDropsName]; ok && n != "" {
 		nodePacketDropsName = n
 	}
-	s.nodeNetworkPacketDrops, err = s.meter.Int64Counter(nodePacketDropsName,
-		metric.WithDescription("Node network packet drops (incremental)"))
-	if err != nil {
-		return err
-	}
+	_ = nodePacketDropsName
 	if err != nil {
 		return err
 	}
@@ -1250,11 +1052,160 @@ func (s *Simulator) initMetrics(ctx context.Context) error {
 			nodeCtxName = n
 		}
 	}
-	s.nodeContextSwitches, err = s.meter.Float64Counter(nodeCtxName,
-		metric.WithDescription("Node context switches (incremental)"))
-	if err != nil {
-		return err
+	_ = nodeCtxName
+
+	// Build default dynamic metric list for built-in instruments
+	toRegister := []DynamicMetricConfig{
+		{Name: txTotalName, Type: "counter", DataType: "int", Description: "Total number of transactions"},
+		{Name: txFailedName, Type: "counter", DataType: "int", Description: "Total number of failed transactions"},
+		{Name: dbOpsName, Type: "counter", DataType: "int", Description: "Total database operations"},
+		{Name: kafkaProduceName, Type: "counter", DataType: "int", Description: "Total Kafka produce operations"},
+		{Name: kafkaConsumeName, Type: "counter", DataType: "int", Description: "Total Kafka consume operations"},
+
+		{Name: txLatencyName, Type: "histogram", DataType: "float", Description: "Transaction processing latency", Buckets: s.transactionLatencyBuckets},
+		{Name: txLatencyName + "_bucket", Type: "counter", DataType: "float", Description: "Transaction latency buckets (cumulative)"},
+		{Name: txLatencyName + "_sum", Type: "counter", DataType: "float", Description: "Transaction latency sum (seconds)"},
+		{Name: txLatencyName + "_count", Type: "counter", DataType: "int", Description: "Transaction latency count"},
+
+		{Name: dbLatencyName, Type: "histogram", DataType: "float", Description: "Database operation latency", Buckets: s.dbLatencyBuckets},
+		{Name: dbLatencyName + "_bucket", Type: "counter", DataType: "float", Description: "DB latency buckets (cumulative)"},
+		{Name: dbLatencyName + "_sum", Type: "counter", DataType: "float", Description: "DB latency sum (seconds)"},
+		{Name: dbLatencyName + "_count", Type: "counter", DataType: "int", Description: "DB latency count"},
+
+		{Name: txAmountSumName, Type: "counter", DataType: "int", Description: "Sum of transaction amounts in paise"},
+		{Name: txAmountCountName, Type: "counter", DataType: "int", Description: "Count of transactions for amount metrics"},
+
+		{Name: kafkaProduceLatencyName, Type: "histogram", DataType: "float", Description: "Latency for kafka produce operations"},
+		{Name: kafkaConsumeLatencyName, Type: "histogram", DataType: "float", Description: "Latency for kafka consume operations"},
+
+		// JVM
+		{Name: jvmUsedName, Type: "gauge", DataType: "float", Description: "JVM heap memory used in bytes"},
+		{Name: jvmMaxName, Type: "gauge", DataType: "float", Description: "JVM heap memory max in bytes"},
+		{Name: jvmGCSumName, Type: "counter", DataType: "float", Description: "Total seconds spent in JVM GC"},
+		{Name: jvmGCCountName, Type: "counter", DataType: "int", Description: "Total number of JVM garbage collections"},
+
+		// Tomcat
+		{Name: tomcatBusyName, Type: "gauge", DataType: "int", Description: "Number of busy tomcat threads"},
+		{Name: tomcatMaxName, Type: "gauge", DataType: "int", Description: "Configured number of tomcat max threads"},
+		{Name: tomcatQueueName, Type: "gauge", DataType: "float", Description: "Queue seconds spent waiting for Tomcat threads"},
+
+		// Process
+		{Name: cpuName, Type: "gauge", DataType: "float", Description: "CPU usage (percent) for process"},
+		{Name: uptimeName, Type: "gauge", DataType: "float", Description: "Process uptime in seconds"},
+		{Name: filesOpenName, Type: "gauge", DataType: "int", Description: "Process open file descriptors"},
+		{Name: filesMaxName, Type: "gauge", DataType: "int", Description: "Process max file descriptors"},
+
+		// Hikari
+		{Name: hikariActiveName, Type: "gauge", DataType: "int", Description: "Hikari active connections"},
+		{Name: hikariMaxName, Type: "gauge", DataType: "int", Description: "Hikari max connections"},
+
+		// Redis
+		{Name: redisUsedName, Type: "gauge", DataType: "float", Description: "Redis/KeyDB memory used bytes"},
+		{Name: redisMaxName, Type: "gauge", DataType: "float", Description: "Redis/KeyDB memory max bytes"},
+		{Name: redisHitsName, Type: "counter", DataType: "int", Description: "Redis keyspace hits"},
+		{Name: redisMissName, Type: "counter", DataType: "int", Description: "Redis keyspace misses"},
+		{Name: redisEvictName, Type: "counter", DataType: "int", Description: "Redis key evictions"},
+		{Name: redisClientsName, Type: "gauge", DataType: "int", Description: "Redis connected clients"},
+		{Name: masterReplName, Type: "gauge", DataType: "int", Description: "Redis master replication offset"},
+		{Name: slaveReplName, Type: "gauge", DataType: "int", Description: "Redis slave replication offset"},
+
+		// Kafka extras
+		{Name: kafkaURPName, Type: "gauge", DataType: "int", Description: "Kafka under replicated partitions"},
+		{Name: kafkaReqName, Type: "counter", DataType: "float", Description: "Kafka network requests per second (incremental)"},
+		{Name: kafkaBytesName, Type: "counter", DataType: "float", Description: "Kafka bytes in per second (incremental)"},
+		{Name: kafkaErrName, Type: "counter", DataType: "int", Description: "Kafka request errors per second"},
+		{Name: kafkaISRName, Type: "counter", DataType: "float", Description: "Kafka ISR changes per second (shrinks+expands)"},
+
+		// Node exporter / infra
+		{Name: nodeLoadName, Type: "gauge", DataType: "float", Description: "1-minute load average"},
+		{Name: nodeMemAvailName, Type: "gauge", DataType: "float", Description: "Node available memory bytes"},
+		{Name: nodeMemTotalName, Type: "gauge", DataType: "float", Description: "Node total memory bytes"},
+		{Name: nodeFsAvailName, Type: "gauge", DataType: "float", Description: "Node filesystem available bytes"},
+		{Name: nodeFsSizeName, Type: "gauge", DataType: "float", Description: "Node filesystem size bytes"},
+		{Name: nodeDiskIOName, Type: "counter", DataType: "float", Description: "Node disk io time seconds (cumulative)"},
+		{Name: nodeNetLatencyName, Type: "gauge", DataType: "float", Description: "Node network latency in milliseconds (gauge-like)"},
+		{Name: nodePacketDropsName, Type: "counter", DataType: "int", Description: "Node network packet drops (incremental)"},
+		{Name: nodeCtxName, Type: "counter", DataType: "float", Description: "Node context switches (incremental)"},
+		// Cassandra scenario-driven
+		{Name: cassandraDiskPressureName, Type: "gauge", DataType: "float", Description: "Synthetic cassandra disk pressure gauge (scenario-driven)"},
+		{Name: cassandraCompactionName, Type: "gauge", DataType: "int", Description: "Pending compaction tasks on Cassandra node (gauge-like)"},
 	}
+
+	// register all user-specified dynamic metrics first and append built-in defaults
+	combined := append([]DynamicMetricConfig{}, s.telemCfg.DynamicMetrics...)
+	combined = append(combined, toRegister...)
+	if err := s.metricRegistry.Register(combined); err != nil {
+		return fmt.Errorf("register dynamic metrics: %w", err)
+	}
+
+	// assign struct fields from registry (prefer registry handles so recording sites remain unchanged)
+	s.transactionsTotal = s.metricRegistry.GetIntCounter(txTotalName)
+	s.transactionsFailedTotal = s.metricRegistry.GetIntCounter(txFailedName)
+	s.dbOpsTotal = s.metricRegistry.GetIntCounter(dbOpsName)
+	s.kafkaProduceTotal = s.metricRegistry.GetIntCounter(kafkaProduceName)
+	s.kafkaConsumeTotal = s.metricRegistry.GetIntCounter(kafkaConsumeName)
+
+	s.transactionLatency = s.metricRegistry.GetFloatHistogram(txLatencyName)
+	s.transactionLatencyBucket = s.metricRegistry.GetFloatCounter(txLatencyName + "_bucket")
+	s.transactionLatencySum = s.metricRegistry.GetFloatCounter(txLatencyName + "_sum")
+	s.transactionLatencyCount = s.metricRegistry.GetIntCounter(txLatencyName + "_count")
+
+	s.dbLatency = s.metricRegistry.GetFloatHistogram(dbLatencyName)
+	s.dbLatencyBucket = s.metricRegistry.GetFloatCounter(dbLatencyName + "_bucket")
+	s.dbLatencySum = s.metricRegistry.GetFloatCounter(dbLatencyName + "_sum")
+	s.dbLatencyCount = s.metricRegistry.GetIntCounter(dbLatencyName + "_count")
+
+	s.transactionAmountSum = s.metricRegistry.GetIntCounter(txAmountSumName)
+	s.transactionAmountCount = s.metricRegistry.GetIntCounter(txAmountCountName)
+
+	s.kafkaProduceLatency = s.metricRegistry.GetFloatHistogram(kafkaProduceLatencyName)
+	s.kafkaConsumeLatency = s.metricRegistry.GetFloatHistogram(kafkaConsumeLatencyName)
+
+	s.jvmMemoryUsed = s.metricRegistry.GetFloatUpDown(jvmUsedName)
+	s.jvmMemoryMax = s.metricRegistry.GetFloatUpDown(jvmMaxName)
+	s.jvmGCPauseSecondsSum = s.metricRegistry.GetFloatCounter(jvmGCSumName)
+	s.jvmGCPauseSecondsCount = s.metricRegistry.GetIntCounter(jvmGCCountName)
+
+	s.tomcatThreadsBusy = s.metricRegistry.GetIntUpDown(tomcatBusyName)
+	s.tomcatThreadsMax = s.metricRegistry.GetIntUpDown(tomcatMaxName)
+	s.tomcatThreadsQueueSec = s.metricRegistry.GetFloatUpDown(tomcatQueueName)
+
+	s.processCPUUsage = s.metricRegistry.GetFloatUpDown(cpuName)
+	s.processUptimeSeconds = s.metricRegistry.GetFloatUpDown(uptimeName)
+	s.processFilesOpen = s.metricRegistry.GetIntUpDown(filesOpenName)
+	s.processFilesMax = s.metricRegistry.GetIntUpDown(filesMaxName)
+
+	s.hikariConnectionsActive = s.metricRegistry.GetIntUpDown(hikariActiveName)
+	s.hikariConnectionsMax = s.metricRegistry.GetIntUpDown(hikariMaxName)
+
+	s.redisMemoryUsed = s.metricRegistry.GetFloatUpDown(redisUsedName)
+	s.redisMemoryMax = s.metricRegistry.GetFloatUpDown(redisMaxName)
+	s.redisKeyspaceHits = s.metricRegistry.GetIntCounter(redisHitsName)
+	s.redisKeyspaceMisses = s.metricRegistry.GetIntCounter(redisMissName)
+	s.redisEvictedKeys = s.metricRegistry.GetIntCounter(redisEvictName)
+	s.redisConnectedClients = s.metricRegistry.GetIntUpDown(redisClientsName)
+	s.redisMasterReplOffset = s.metricRegistry.GetIntUpDown(masterReplName)
+	s.redisSlaveReplOffset = s.metricRegistry.GetIntUpDown(slaveReplName)
+
+	s.kafkaUnderReplicated = s.metricRegistry.GetIntUpDown(kafkaURPName)
+	s.kafkaRequestsPerSec = s.metricRegistry.GetFloatCounter(kafkaReqName)
+	s.kafkaBytesInPerSec = s.metricRegistry.GetFloatCounter(kafkaBytesName)
+	s.kafkaRequestErrors = s.metricRegistry.GetIntCounter(kafkaErrName)
+	s.kafkaISRChanges = s.metricRegistry.GetFloatCounter(kafkaISRName)
+
+	s.nodeLoad1 = s.metricRegistry.GetFloatUpDown(nodeLoadName)
+	s.nodeMemoryAvailable = s.metricRegistry.GetFloatUpDown(nodeMemAvailName)
+	s.nodeMemoryTotal = s.metricRegistry.GetFloatUpDown(nodeMemTotalName)
+	s.nodeFilesystemAvail = s.metricRegistry.GetFloatUpDown(nodeFsAvailName)
+	s.nodeFilesystemSize = s.metricRegistry.GetFloatUpDown(nodeFsSizeName)
+	s.nodeDiskIOTimeSeconds = s.metricRegistry.GetFloatCounter(nodeDiskIOName)
+	s.nodeNetworkLatencyMs = s.metricRegistry.GetFloatUpDown(nodeNetLatencyName)
+	s.nodeNetworkPacketDrops = s.metricRegistry.GetIntCounter(nodePacketDropsName)
+	s.nodeContextSwitches = s.metricRegistry.GetFloatCounter(nodeCtxName)
+
+	// Cassandra scenario-driven signals
+	s.cassandraDiskPressure = s.metricRegistry.GetFloatUpDown(cassandraDiskPressureName)
+	s.cassandraCompactionPending = s.metricRegistry.GetIntUpDown(cassandraCompactionName)
 
 	return nil
 }
@@ -1355,6 +1306,13 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 	if s.stateNodeNetworkLatency == 0 {
 		s.stateNodeNetworkLatency = 3.0 // ms baseline
 	}
+	// cassandra defaults
+	if s.stateCassandraDiskPressure == 0 {
+		s.stateCassandraDiskPressure = 0.02
+	}
+	if s.stateCassandraCompactionPending == 0 {
+		s.stateCassandraCompactionPending = 0
+	}
 	s.stateLock.Unlock()
 
 	// initialize multipliers
@@ -1399,6 +1357,54 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						for _, eff := range e.effects {
 							fmt.Printf("[DEBUG] active effect: metric=%s op=%s value=%v\n", eff.Metric, eff.Op, eff.Value)
 							switch eff.Metric {
+							case "cassandra_disk_pressure":
+								switch eff.Op {
+								case "scale":
+									s.stateCassandraDiskPressure *= eff.Value
+								case "add":
+									s.stateCassandraDiskPressure += eff.Value
+								case "set":
+									s.stateCassandraDiskPressure = eff.Value
+								case "ramp":
+									s.stateCassandraDiskPressure += eff.Step
+								}
+
+							case "cassandra_compaction_pending_tasks":
+								switch eff.Op {
+								case "scale":
+									s.stateCassandraCompactionPending = int64(float64(s.stateCassandraCompactionPending) * eff.Value)
+								case "add":
+									s.stateCassandraCompactionPending += int64(eff.Value)
+								case "set":
+									s.stateCassandraCompactionPending = int64(eff.Value)
+								case "ramp":
+									s.stateCassandraCompactionPending += int64(eff.Step)
+								}
+
+							case "node_filesystem_avail_bytes":
+								switch eff.Op {
+								case "scale":
+									s.stateFsAvail = s.stateFsAvail * eff.Value
+								case "add":
+									s.stateFsAvail = s.stateFsAvail + eff.Value
+								case "set":
+									s.stateFsAvail = eff.Value
+								case "ramp":
+									s.stateFsAvail = s.stateFsAvail + eff.Step
+								}
+
+							case "node_filesystem_size_bytes":
+								switch eff.Op {
+								case "scale":
+									s.stateFsSize = s.stateFsSize * eff.Value
+								case "add":
+									s.stateFsSize = s.stateFsSize + eff.Value
+								case "set":
+									s.stateFsSize = eff.Value
+								case "ramp":
+									s.stateFsSize = s.stateFsSize + eff.Step
+								}
+
 							case "db_latency", "db_latency_seconds":
 								switch eff.Op {
 								case "scale":
@@ -1565,10 +1571,10 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 					}
 					add := next - s.stateJvmUsed
 					if add != 0 {
-						s.jvmMemoryUsed.Add(ctx, add)
+						s.safeAddFloatUpDown(s.jvmMemoryUsed, ctx, add)
 					}
 					s.stateJvmUsed = next
-					s.jvmMemoryMax.Add(ctx, s.stateJvmMax-s.stateJvmMax) // ensure max exists (delta 0)
+					s.safeAddFloatUpDown(s.jvmMemoryMax, ctx, s.stateJvmMax-s.stateJvmMax) // ensure max exists (delta 0)
 					s.stateLock.Unlock()
 				}
 
@@ -1599,7 +1605,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 					}
 					delta := nextBusy - s.stateTomcatBusy
 					if delta != 0 {
-						s.tomcatThreadsBusy.Add(ctx, delta)
+						s.safeAddInt64UpDown(s.tomcatThreadsBusy, ctx, delta)
 					}
 					s.stateTomcatBusy = nextBusy
 					// queue grows when nearing max
@@ -1607,7 +1613,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 					q := load * s.rng.Float64() * 2.0 * s.stateTomcatLoadMult
 					qDelta := q - s.stateTomcatQueue
 					if qDelta != 0 {
-						s.tomcatThreadsQueueSec.Add(ctx, qDelta)
+						s.safeAddFloatUpDown(s.tomcatThreadsQueueSec, ctx, qDelta)
 					}
 					s.stateTomcatQueue = q
 					s.stateLock.Unlock()
@@ -1625,7 +1631,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						nextCPU = 100
 					}
 					if nextCPU != s.stateCPU {
-						s.processCPUUsage.Add(ctx, nextCPU-s.stateCPU)
+						s.safeAddFloatUpDown(s.processCPUUsage, ctx, nextCPU-s.stateCPU)
 					}
 					s.stateCPU = nextCPU
 					s.stateLock.Unlock()
@@ -1647,7 +1653,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						nextConn = s.stateHikariMax
 					}
 					if nextConn != s.stateHikariActive {
-						s.hikariConnectionsActive.Add(ctx, nextConn-s.stateHikariActive)
+						s.safeAddInt64UpDown(s.hikariConnectionsActive, ctx, nextConn-s.stateHikariActive)
 					}
 					s.stateHikariActive = nextConn
 					s.stateLock.Unlock()
@@ -1667,7 +1673,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						s.safeAddInt64Counter(s.redisEvictedKeys, ctx, 1)
 					}
 					if next != s.stateRedisUsed {
-						s.redisMemoryUsed.Add(ctx, next-s.stateRedisUsed)
+						s.safeAddFloatUpDown(s.redisMemoryUsed, ctx, next-s.stateRedisUsed)
 					}
 					s.stateRedisUsed = next
 					s.stateLock.Unlock()
@@ -1690,7 +1696,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						nextMaster = 0
 					}
 					if nextMaster != s.stateRedisMasterOffset {
-						s.redisMasterReplOffset.Add(ctx, nextMaster-s.stateRedisMasterOffset)
+						s.safeAddInt64UpDown(s.redisMasterReplOffset, ctx, nextMaster-s.stateRedisMasterOffset)
 					}
 					s.stateRedisMasterOffset = nextMaster
 
@@ -1708,7 +1714,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						nextSlave = 0
 					}
 					if nextSlave != s.stateRedisSlaveOffset {
-						s.redisSlaveReplOffset.Add(ctx, nextSlave-s.stateRedisSlaveOffset)
+						s.safeAddInt64UpDown(s.redisSlaveReplOffset, ctx, nextSlave-s.stateRedisSlaveOffset)
 					}
 					s.stateRedisSlaveOffset = nextSlave
 					s.stateLock.Unlock()
@@ -1721,7 +1727,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						n = 1
 					}
 					delta := int64(float64(s.rng.Intn(n)+1) * s.stateKafkaURPMult)
-					s.kafkaUnderReplicated.Add(ctx, delta)
+					s.safeAddInt64UpDown(s.kafkaUnderReplicated, ctx, delta)
 					s.stateKafkaURP += delta
 				}
 
@@ -1740,7 +1746,7 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						nextNet = 2000
 					}
 					if nextNet != s.stateNodeNetworkLatency {
-						s.nodeNetworkLatencyMs.Add(ctx, nextNet-s.stateNodeNetworkLatency)
+						s.safeAddFloatUpDown(s.nodeNetworkLatencyMs, ctx, nextNet-s.stateNodeNetworkLatency)
 					}
 					s.stateNodeNetworkLatency = nextNet
 
@@ -1778,6 +1784,60 @@ func (s *Simulator) startBackgroundMetrics(ctx context.Context) {
 						s.safeAddFloat64Counter(s.kafkaISRChanges, ctx, s.rng.Float64()*s.stateKafkaErrorMult)
 					}
 				}
+			}
+
+			// Cassandra scenario-driven signals: record disk pressure and compaction backlog
+			{
+				s.stateLock.Lock()
+				// Node filesystem metrics: apply tiny noise and export (so KPI formulas have data)
+				fsDelta := (s.rng.Float64() - 0.5) * 0.02 * s.stateFsSize
+				nextFs := s.stateFsAvail + fsDelta
+				if nextFs < 0 {
+					nextFs = 0
+				}
+				if nextFs > s.stateFsSize {
+					nextFs = s.stateFsSize
+				}
+				if nextFs != s.stateFsAvail {
+					s.safeAddFloatUpDown(s.nodeFilesystemAvail, ctx, nextFs-s.stateFsAvail)
+				}
+				s.stateFsAvail = nextFs
+				// ensure size gauge exists (delta 0) so collectors see it
+				s.safeAddFloatUpDown(s.nodeFilesystemSize, ctx, s.stateFsSize-s.stateFsSize)
+				// disk pressure - small random walk influenced by any scenario-applied value
+				diskDelta := (s.rng.Float64() - 0.5) * 0.02
+				nextDisk := s.stateCassandraDiskPressure + diskDelta
+				if nextDisk < 0 {
+					nextDisk = 0
+				}
+				if nextDisk > 1.0 {
+					nextDisk = 1.0
+				}
+				if nextDisk != s.stateCassandraDiskPressure {
+					// prefer dynamic registry if metric registered
+					if s.metricRegistry != nil && s.metricRegistry.Has("cassandra_disk_pressure") {
+						_ = s.metricRegistry.AddFloat(ctx, "cassandra_disk_pressure", nextDisk-s.stateCassandraDiskPressure)
+					} else {
+						s.safeAddFloatUpDown(s.cassandraDiskPressure, ctx, nextDisk-s.stateCassandraDiskPressure)
+					}
+				}
+				s.stateCassandraDiskPressure = nextDisk
+
+				// compaction pending tasks - small random delta
+				compDelta := int64(s.rng.Intn(3) - 1)
+				nextComp := s.stateCassandraCompactionPending + compDelta
+				if nextComp < 0 {
+					nextComp = 0
+				}
+				if nextComp != s.stateCassandraCompactionPending {
+					if s.metricRegistry != nil && s.metricRegistry.Has("cassandra_compaction_pending_tasks") {
+						_ = s.metricRegistry.AddInt(ctx, "cassandra_compaction_pending_tasks", nextComp-s.stateCassandraCompactionPending)
+					} else {
+						s.safeAddInt64UpDown(s.cassandraCompactionPending, ctx, nextComp-s.stateCassandraCompactionPending)
+					}
+				}
+				s.stateCassandraCompactionPending = nextComp
+				s.stateLock.Unlock()
 			}
 		}
 	}()
@@ -2548,6 +2608,29 @@ func (s *Simulator) safeAddInt64Counter(c metric.Int64Counter, ctx context.Conte
 func (s *Simulator) safeAddFloat64Counter(c metric.Float64Counter, ctx context.Context, v float64, attrs ...attribute.KeyValue) {
 	if v < 0 {
 		v = 0
+	}
+	if len(attrs) > 0 {
+		c.Add(ctx, v, metric.WithAttributes(attrs...))
+	} else {
+		c.Add(ctx, v)
+	}
+}
+
+// Safe add helpers for UpDown counters (gauges) — tolerate nil instruments
+func (s *Simulator) safeAddFloatUpDown(c metric.Float64UpDownCounter, ctx context.Context, v float64, attrs ...attribute.KeyValue) {
+	if c == nil {
+		return
+	}
+	if len(attrs) > 0 {
+		c.Add(ctx, v, metric.WithAttributes(attrs...))
+	} else {
+		c.Add(ctx, v)
+	}
+}
+
+func (s *Simulator) safeAddInt64UpDown(c metric.Int64UpDownCounter, ctx context.Context, v int64, attrs ...attribute.KeyValue) {
+	if c == nil {
+		return
 	}
 	if len(attrs) > 0 {
 		c.Add(ctx, v, metric.WithAttributes(attrs...))

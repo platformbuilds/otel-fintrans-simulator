@@ -51,6 +51,18 @@ type TelemetryConfig struct {
 		OrgNames         []string `yaml:"org_names,omitempty"`
 		TransactionTypes []string `yaml:"transaction_types,omitempty"`
 	} `yaml:"labels,omitempty"`
+
+	// DynamicMetrics allows declaring new metrics that will be created at startup
+	DynamicMetrics []DynamicMetricConfig `yaml:"dynamic_metrics,omitempty"`
+}
+
+// DynamicMetricConfig describes a metric that can be created at runtime.
+type DynamicMetricConfig struct {
+	Name        string    `yaml:"name"`
+	Type        string    `yaml:"type"`     // counter | gauge | histogram
+	DataType    string    `yaml:"dataType"` // float | int
+	Description string    `yaml:"description,omitempty"`
+	Buckets     []float64 `yaml:"buckets,omitempty"` // for histograms
 }
 
 // Burst describes a temporary window where failure probability is increased.

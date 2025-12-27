@@ -42,6 +42,42 @@ TRANSACTION_RATE=100 ./bin/otel-fintrans-simulator
 
 # Print simulator logs to stdout instead of no-op logging
 ./bin/otel-fintrans-simulator --log-output stdout
+
+Helper scripts
+--------------
+We've added small helper scripts under `scripts/` to make local runs and scenario testing easier. They are convenience wrappers that will build the simulator binary if missing and run the desired scenario(s).
+
+Make them executable first (one-time):
+
+```bash
+chmod +x ./scripts/*.sh
+```
+
+Common helper scripts
+
+- `./scripts/build_and_run.sh [args...]` — Build (if needed) and run a simulator binary with any arguments you pass through. E.g.:
+
+```bash
+./scripts/build_and_run.sh --config simulator-config.yaml --log-output stdout --signal-time-interval=5s
+```
+
+- `./scripts/run_examples.sh list` — list all example scenario YAML files shipped in `examples/scenarios`.
+- `./scripts/run_examples.sh run <name|path>` — run a particular scenario (delegates to `examples/run_scenario.sh`). Example:
+
+```bash
+./scripts/run_examples.sh run cassandra_disk_pressure
+```
+
+- `./scripts/run_examples.sh run-all` — sequentially runs all example scenarios quickly using lightweight defaults (short run lengths and reduced transaction volumes) — handy for smoke-testing.
+
+- `./scripts/gen_varied_scenarios.sh` — generates short/long/ramp variants for every scenario and writes them to `examples/generated/` so you can quickly test variant behaviours without editing original files.
+
+Example: generate variants and run one
+
+```bash
+./scripts/gen_varied_scenarios.sh
+./scripts/run_examples.sh run examples/generated/cassandra_disk_pressure.short.yaml
+```
 ```
 
 ### Metric export interval
@@ -131,6 +167,36 @@ By default the example config shipped with the tool is `simulator-config.yaml` (
 ```
 
 The `failure` section supports a `bursty` mode and a list of `bursts` where the failure rate is multiplied for a time window. This enables more realistic, correlated failures.
+
+Dynamic metric declarations
+-------------------------
+The simulator can now create extra metrics at startup driven purely by configuration using `telemetry.dynamic_metrics`. This enables teams to add new gauges, counters or histograms without changing code. Example:
+
+```yaml
+telemetry:
+  dynamic_metrics:
+    - name: cassandra_disk_pressure
+      type: gauge
+      dataType: float
+      description: "Synthetic disk pressure metric"
+
+    - name: api_request_latency_seconds
+      type: histogram
+      dataType: float
+      buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+```
+
+The simulator will validate the dynamic metric schema and create OTEL instruments at startup. Recording can be configured via scenarios or the simulator will emit sample values for gauge/histogram types.
+
+Fully dynamic (all built-in metrics)
+----------------------------------
+The simulator now registers all built-in instruments via the dynamic MetricRegistry at startup. That means:
+
+- You can override any of the default metric names using `telemetry.metric_names` in the YAML; the registry will create instruments using the effective names at startup.
+- You can add entirely new metrics via `telemetry.dynamic_metrics` and the simulator will create and expose those instruments at startup without any code changes.
+- Runtime recording prefers registry-backed handles so the simulator supports a fully dynamic telemetry surface. If a metric is declared in `dynamic_metrics` it will be available to scenarios and background generators.
+
+This enables teams to add or rename KPIs and instrumentation without modifying the simulator binary — edit the YAML and restart.
 
 Configuration example
 ---------------------
@@ -289,6 +355,69 @@ failure:
 YAML
 
 TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config /tmp/kafka_disk_issue.yaml --log-output stdout --rand-seed 12345
+```
+
+6) Cassandra gradual disk-pressure (simulates disk filling up causing compaction backlog, IO pressure and downstream latency/failures)
+```yaml
+- name: "cassandra_disk_pressure_gradual"
+  start: "10s"
+  duration: "3m"
+  labels:
+    OrgId: ["bank_02"]
+  effects:
+    - metric: "cassandra_disk_pressure"   # synthetic, ramps gradually
+      op: "ramp"
+      step: 0.2
+    - metric: "node_filesystem_avail_bytes"  # available bytes reduced (simulated)
+      op: "scale"
+      value: 0.35
+    - metric: "cassandra_compaction_pending_tasks"  # compaction backlog grows
+      op: "add"
+      value: 5
+    - metric: "db_latency"
+      op: "scale"
+      value: 3.0
+    - metric: "transaction_latency_seconds"
+      op: "scale"
+      value: 2.0
+    - metric: "transactions_failed_total"
+      op: "scale"
+      value: 4.0
+```
+
+Run this scenario (one-liner):
+
+```bash
+cat > /tmp/cassandra_disk_pressure.yaml <<'YAML'
+failure:
+  scenarios:
+    - name: "cassandra_disk_pressure_gradual"
+      start: "10s"
+      duration: "3m"
+      labels:
+        OrgId: ["bank_02"]
+      effects:
+        - metric: "cassandra_disk_pressure"
+          op: "ramp"
+          step: 0.2
+        - metric: "node_filesystem_avail_bytes"
+          op: "scale"
+          value: 0.35
+        - metric: "cassandra_compaction_pending_tasks"
+          op: "add"
+          value: 5
+        - metric: "db_latency"
+          op: "scale"
+          value: 3.0
+        - metric: "transaction_latency_seconds"
+          op: "scale"
+          value: 2.0
+        - metric: "transactions_failed_total"
+          op: "scale"
+          value: 4.0
+YAML
+
+TRANSACTION_RATE=50 ./bin/otel-fintrans-simulator --config /tmp/cassandra_disk_pressure.yaml --log-output stdout --rand-seed 12345
 ```
 
 3) KeyDB / valkey memory fault (bad RAM causing in-memory DB failures)

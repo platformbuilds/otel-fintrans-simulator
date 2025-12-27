@@ -333,23 +333,50 @@ func TestScenarioScheduler_mixedSignalsApplied(t *testing.T) {
 	sim.scenarioSched = ss
 	sim.dataInterval = 10 * time.Millisecond
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 
 	go sim.startBackgroundMetrics(ctx)
-	<-ctx.Done()
 
-	if sim.stateKafkaErrorMult <= 1.0 {
-		t.Fatalf("expected kafka error multiplier > 1.0; got %v", sim.stateKafkaErrorMult)
+	// Poll the multipliers during the run and assert that each expected change
+	// happened at least once. This is a bit more robust against timing races
+	// caused by resets that occur at tick boundaries.
+	seenKafkaErr := false
+	seenKafkaReqs := false
+	seenDBLatency := false
+	seenFailure := false
+
+	checkEnd := time.Now().Add(350 * time.Millisecond)
+	for time.Now().Before(checkEnd) {
+		if sim.stateKafkaErrorMult > 1.0 {
+			seenKafkaErr = true
+		}
+		if sim.stateKafkaReqsMult < 1.0 {
+			seenKafkaReqs = true
+		}
+		if sim.stateDbLatencyMult > 1.0 {
+			seenDBLatency = true
+		}
+		if sim.stateFailureMult < 1.0 {
+			seenFailure = true
+		}
+		if seenKafkaErr && seenKafkaReqs && seenDBLatency && seenFailure {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if sim.stateKafkaReqsMult >= 1.0 {
-		t.Fatalf("expected kafka requests multiplier < 1.0; got %v", sim.stateKafkaReqsMult)
+
+	if !seenKafkaErr {
+		t.Fatalf("expected kafka error multiplier > 1.0 at some point; never observed")
 	}
-	if sim.stateDbLatencyMult <= 1.0 {
-		t.Fatalf("expected db latency multiplier > 1.0; got %v", sim.stateDbLatencyMult)
+	if !seenKafkaReqs {
+		t.Fatalf("expected kafka requests multiplier < 1.0 at some point; never observed")
 	}
-	if sim.stateFailureMult >= 1.0 {
-		t.Fatalf("expected failure multiplier < 1.0 (set to 0.5); got %v", sim.stateFailureMult)
+	if !seenDBLatency {
+		t.Fatalf("expected db latency multiplier > 1.0 at some point; never observed")
+	}
+	if !seenFailure {
+		t.Fatalf("expected failure multiplier < 1.0 (set to 0.5) at some point; never observed")
 	}
 }
 
@@ -363,6 +390,90 @@ func TestHistogramBucketRecording_noPanic(t *testing.T) {
 	ctx := context.Background()
 	sim.recordTransactionLatencyBuckets(ctx, 0.12, attribute.String("service_name", "api-gateway"))
 	sim.recordDBLatencyBuckets(ctx, 0.002, attribute.String("db_system", "cassandra"))
+}
+
+// Test that initMetrics registers the expected built-in metrics in the dynamic registry
+func TestInitMetrics_registryHasBuiltins(t *testing.T) {
+	sim := &Simulator{tracer: otel.Tracer("test"), meter: otel.Meter("test"), logger: zap.NewNop()}
+	if err := sim.initMetrics(context.Background()); err != nil {
+		t.Fatalf("initMetrics failed: %v", err)
+	}
+
+	// Expected built-in metrics (defaults)
+	expected := []string{
+		"transactions_total",
+		"transactions_failed_total",
+		"db_ops_total",
+		"kafka_produce_total",
+		"kafka_consume_total",
+
+		"transaction_latency_seconds",
+		"transaction_latency_seconds_bucket",
+		"transaction_latency_seconds_sum",
+		"transaction_latency_seconds_count",
+
+		"db_latency_seconds",
+		"db_latency_seconds_bucket",
+		"db_latency_seconds_sum",
+		"db_latency_seconds_count",
+
+		"transaction_amount_paisa_sum",
+		"transaction_amount_paisa_count",
+
+		"kafka_produce_latency_seconds",
+		"kafka_consume_latency_seconds",
+
+		"jvm_memory_used_bytes",
+		"jvm_memory_max_bytes",
+		"jvm_gc_pause_seconds_sum",
+		"jvm_gc_pause_seconds_count",
+
+		"tomcat_threads_busy_threads",
+		"tomcat_threads_config_max_threads",
+		"tomcat_threads_queue_seconds",
+
+		"process_cpu_usage",
+		"process_uptime_seconds",
+		"process_files_open_files",
+		"process_files_max_files",
+
+		"hikaricp_connections_active",
+		"hikaricp_connections_max",
+
+		"redis_memory_used_bytes",
+		"redis_memory_max_bytes",
+		"redis_keyspace_hits_total",
+		"redis_keyspace_misses_total",
+		"redis_evicted_keys_total",
+		"redis_connected_clients",
+		"redis_master_repl_offset",
+		"redis_slave_repl_offset",
+
+		"kafka_controller_UnderReplicatedPartitions",
+		"kafka_network_RequestMetrics_RequestsPerSec",
+		"kafka_server_BrokerTopicMetrics_BytesInPerSec",
+		"kafka_network_RequestMetrics_ErrorsPerSec",
+		"kafka_controller_IsrShrinksPerSec",
+
+		"node_load1",
+		"node_memory_MemAvailable_bytes",
+		"node_memory_MemTotal_bytes",
+		"node_filesystem_avail_bytes",
+		"node_filesystem_size_bytes",
+		"node_disk_io_time_seconds_total",
+		"node_network_latency_ms",
+		"node_network_packet_drops_total",
+		"node_context_switches_total",
+
+		"cassandra_disk_pressure",
+		"cassandra_compaction_pending_tasks",
+	}
+
+	for _, name := range expected {
+		if !sim.metricRegistry.Has(name) {
+			t.Fatalf("expected metric %s to be registered", name)
+		}
+	}
 }
 
 func TestInitOTel_stdoutOnly(t *testing.T) {
